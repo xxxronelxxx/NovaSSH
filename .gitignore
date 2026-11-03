@@ -1,0 +1,37 @@
+# Rust
+/target
+/rust/**/target
+**/*.rs.bk
+
+# Flutter / Dart
+app/.dart_tool/
+app/.flutter-plugins
+app/.flutter-plugins-dependencies
+app/build/
+app/android/.gradle/
+app/android/local.properties
+app/android/app/src/main/jniLibs/
+app/windows/flutter/ephemeral/
+app/linux/flutter/ephemeral/
+app/macos/Flutter/ephemeral/
+app/.idea/
+*.iml
+
+# Generated bridge artefacts are committed, but keep caches out.
+app/lib/bridge/*.g.dart
+
+# Release artefacts
+/dist/
+/dist/*.zip
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# Exported profiles contain server passwords in plain text
+*.novaprof
+
+# Local WinSCP import file contains real sessions and encrypted passwords
+/WinSCP.ini
