@@ -39,3 +39,6 @@ Thumbs.db
 # Android release signing keys (never commit)
 /keys/
 /app/android/key.properties
+
+# badge-maker tooling
+/tools/badges/node_modules/

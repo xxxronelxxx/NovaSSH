@@ -1,0 +1,12 @@
+{
+  "name": "nova-badges",
+  "private": true,
+  "type": "module",
+  "description": "Regenerates the static README badges with badge-maker",
+  "scripts": {
+    "update": "node update.mjs"
+  },
+  "dependencies": {
+    "badge-maker": "^6.0.0"
+  }
+}

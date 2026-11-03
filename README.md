@@ -1,5 +1,15 @@
 # NovaSSH
 
+<p align="center">
+  <a href="https://github.com/xxxronelxxx/NovaSSH/releases/latest">
+    <img src="https://img.shields.io/github/v/release/xxxronelxxx/NovaSSH?label=release&color=007ec6" alt="release">
+  </a>
+  <a href="https://github.com/xxxronelxxx/NovaSSH/releases/latest">
+    <img src="badges/downloads.svg" alt="Downloads: 15.9 MB">
+  </a>
+  <img src="badges/platform.svg" alt="Windows | Android">
+</p>
+
 SSH/SFTP-коммандер для Windows и Android: две панели, архивы как папки, группы серверов,
 полностью настраиваемая внешность.
 
@@ -47,6 +57,9 @@ powershell -ExecutionPolicy Bypass -File tools\package-android.ps1 -Universal
 
 # arm64-only APK поменьше:
 powershell -ExecutionPolicy Bypass -File tools\package-android.ps1
+
+# обновить статические бейджи (размер установщика) после нового релиза
+cd tools\badges; npm install; npm run update
 ```
 
 > Релизные APK подписываются ключом `keys\novassh-release.jks`
