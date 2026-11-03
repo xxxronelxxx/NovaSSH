@@ -63,13 +63,13 @@ IDI_APP_ICON            ICON                    "resources\\app_icon.ico"
 #if defined(FLUTTER_VERSION_MAJOR) && defined(FLUTTER_VERSION_MINOR) && defined(FLUTTER_VERSION_PATCH) && defined(FLUTTER_VERSION_BUILD)
 #define VERSION_AS_NUMBER FLUTTER_VERSION_MAJOR,FLUTTER_VERSION_MINOR,FLUTTER_VERSION_PATCH,FLUTTER_VERSION_BUILD
 #else
-#define VERSION_AS_NUMBER 1,0,0,0
+#define VERSION_AS_NUMBER 0,5,0,5
 #endif
 
 #if defined(FLUTTER_VERSION)
 #define VERSION_AS_STRING FLUTTER_VERSION
 #else
-#define VERSION_AS_STRING "1.0.0"
+#define VERSION_AS_STRING "0.5.0+5"
 #endif
 
 VS_VERSION_INFO VERSIONINFO
@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "ru.devspb" "\0"
-            VALUE "FileDescription", "nova" "\0"
+            VALUE "FileDescription", "Nova SSH" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "nova" "\0"
+            VALUE "InternalName", "NovaSSH" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 ru.devspb. All rights reserved." "\0"
-            VALUE "OriginalFilename", "nova.exe" "\0"
-            VALUE "ProductName", "nova" "\0"
+            VALUE "OriginalFilename", "NovaSSH.exe" "\0"
+            VALUE "ProductName", "Nova SSH" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

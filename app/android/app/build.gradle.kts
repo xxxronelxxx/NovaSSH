@@ -1,7 +1,16 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+}
+
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 // === NovaSSH Rust bridge ===
@@ -19,27 +28,44 @@ val novaNdkDir = System.getenv("ANDROID_NDK_HOME")
         file("$sdk/ndk").listFiles()?.sortedBy { it.name }?.lastOrNull()?.absolutePath
     }
 
+// release scripts pass -PnovaAbis=arm64-v8a or the full universal set.
+val novaAbis = (project.findProperty("novaAbis") as String?)
+    ?.split(',')
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?: listOf("arm64-v8a")
+val novaJniLibsDir = file("$projectDir/src/main/jniLibs")
+
 val novaCargoNdkBuild = tasks.register<Exec>("novaCargoNdkBuild") {
     workingDir = novaRepoDir
     novaNdkDir?.let { environment("ANDROID_NDK_HOME", it) }
     environment("CARGO_TARGET_DIR", "$novaRepoDir/rust/core/target")
-    // Phone builds only need arm64: it halves the build time and the APK size
-    // (add more targets here if a 32-bit or emulator build is ever needed).
     commandLine(
-        "cargo", "ndk",
-        "-t", "arm64-v8a",
-        "-o", "$projectDir/src/main/jniLibs",
-        "build", "--release",
-        "--manifest-path", "$novaRepoDir/rust/core/Cargo.toml"
+        buildList {
+            add("cargo")
+            add("ndk")
+            novaAbis.forEach {
+                add("-t")
+                add(it)
+            }
+            add("-o")
+            add(novaJniLibsDir.absolutePath)
+            add("build")
+            add("--release")
+            add("--manifest-path")
+            add("$novaRepoDir/rust/core/Cargo.toml")
+        }
     )
-    // Cargo itself is incremental, but Gradle must never skip this task: a
-    // stale .so breaks the bridge (FRB reports a content hash mismatch and the
-    // app hangs on the splash screen).
+    // A stale .so or a previous ABI set must not leak into this APK.
+    doFirst {
+        novaJniLibsDir.deleteRecursively()
+        novaJniLibsDir.mkdirs()
+    }
+    inputs.property("novaAbis", novaAbis.joinToString(","))
     inputs.dir("$novaRepoDir/rust/core/src")
     inputs.files("$novaRepoDir/rust/core/Cargo.toml", "$novaRepoDir/Cargo.lock")
-    outputs.dir("$projectDir/src/main/jniLibs")
+    outputs.dir(novaJniLibsDir)
     outputs.upToDateWhen { false }
-
 }
 
 android {
@@ -67,13 +93,28 @@ android {
         versionName = flutter.versionName
     }
 
-    buildTypes {
-        release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+    signingConfigs {
+        create("release") {
+            if (keystorePropertiesFile.exists()) {
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+                storeFile = rootProject.file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+            }
         }
     }
+
+    buildTypes {
+        release {
+            signingConfig = if (keystorePropertiesFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                // Local builds without the release key still run.
+                signingConfigs.getByName("debug")
+            }
+        }
+    }
+
 }
 
 kotlin {

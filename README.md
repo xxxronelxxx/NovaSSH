@@ -21,27 +21,27 @@ cargo test -p nova_core
 # 3. Генерация моста после правок в rust/core/src/api.rs или model.rs
 flutter_rust_bridge_codegen generate
 
-# 4. Windows (release — тормоза оценивайте только здесь)
-powershell -ExecutionPolicy Bypass -File tools
-un-release.ps1
+# 4. Windows: portable ZIP и установщик
+powershell -ExecutionPolicy Bypass -File tools\package-windows.ps1
+powershell -ExecutionPolicy Bypass -File tools\package-windows-installer.ps1
+# → dist\NovaSSH-<версия>-windows-x64-portable.zip
+# → dist\NovaSSH-<версия>-windows-x64-installer.exe
 
 # debug-цикл во время разработки
 cd app; flutter run -d windows
 
-# 5. Android (сборка .so через cargo-ndk встроена в gradle)
-cd app; flutter run -d <device>
+# 5. Android (Rust-ядро для нужных ABI собирает Gradle)
+powershell -ExecutionPolicy Bypass -File tools\package-android.ps1 -Universal
+# → dist\android\NovaSSH-<версия>-universal.apk (arm64-v8a + armeabi-v7a + x86_64)
 
-# релизные APK: универсальный или по одному на ABI (меньше размер)
-cd app; flutter build apk --release
-cd app; flutter build apk --release --split-per-abi
-
-# установка на подключённый телефон
-adb install -r appuildpp\outputslutter-apkpp-arm64-v8a-release.apk
+# arm64-only APK поменьше:
+powershell -ExecutionPolicy Bypass -File tools\package-android.ps1
 ```
 
-> Релизные APK подписаны debug-ключом (`signingConfigs.debug` в
-> `app/android/app/build.gradle.kts`) — этого достаточно для личной установки.
-> Для Google Play нужен свой keystore.
+> Релизные APK подписываются ключом `keys\novassh-release.jks`
+> (`app/android/key.properties`, в git не попадают). Без этих файлов сборка
+> откатывается на debug-подпись и не подойдёт для обновления установленного
+> релиза. Ключ и пароли нужно хранить в надёжном месте.
 
 ## Встроенный редактор, сессии, журнал
 

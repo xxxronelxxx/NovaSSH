@@ -35,3 +35,7 @@ Thumbs.db
 
 # Local WinSCP import file contains real sessions and encrypted passwords
 /WinSCP.ini
+
+# Android release signing keys (never commit)
+/keys/
+/app/android/key.properties

@@ -1,11 +1,18 @@
-# Builds a release and refreshes the single portable folder dist\NovaSSH
-# plus dist\NovaSSH.zip. No version in the path: version bumps belong to real
-# releases (pubspec.yaml / Runner.rc), not to the build folder.
+# Builds a release and refreshes the portable folder dist\NovaSSH and the
+# versioned portable ZIP. No profile is ever copied into the release: it holds
+# servers, snippets and the encrypted vault.
+#
+# Output: dist\NovaSSH-<version>-windows-x64-portable.zip
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 $release = Join-Path $repo 'app\build\windows\x64\runner\Release'
 $out = Join-Path $repo 'dist\NovaSSH'
-$zip = Join-Path $repo 'dist\NovaSSH.zip'
+$pubspec = Get-Content (Join-Path $repo 'app\pubspec.yaml') -Raw
+if ($pubspec -notmatch '(?m)^version:\s*([0-9]+\.[0-9]+\.[0-9]+)') {
+    throw 'Could not read version from app\pubspec.yaml'
+}
+$version = $Matches[1]
+$zip = Join-Path $repo "dist\NovaSSH-$version-windows-x64-portable.zip"
 
 # Build the Rust core explicitly: Flutter's CMake target can be cached and would
 # otherwise ship a stale nova_core.dll.
@@ -46,6 +53,11 @@ if (-not $mirrored) { throw "Could not refresh $out" }
 
 # The runner is built as NovaSSH.exe directly (BINARY_NAME), so no rename.
 if (Test-Path (Join-Path $out 'nova.exe')) { Remove-Item (Join-Path $out 'nova.exe') -Force }
+
+# Release notes belong to the archive, not to the live profile.
+$readme = (Get-Content (Join-Path $PSScriptRoot 'README-windows.txt') -Raw).Replace('{VERSION}', $version)
+[System.IO.File]::WriteAllText((Join-Path $out 'README.txt'), $readme, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $out 'VERSION.txt'), "NovaSSH $version`r`n", (New-Object System.Text.ASCIIEncoding))
 
 if (Test-Path $zip) { Remove-Item $zip -Force }
 # The archive must not ship the profile (it contains the encrypted vault).
