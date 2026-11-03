@@ -8,6 +8,17 @@ SSH/SFTP-коммандер для Windows и Android: две панели, ар
 - Мост: flutter_rust_bridge 2.13 (типы модели генерируются в обычные Dart-классы).
 - Идентификаторы: `ru.devspb.nova`, приложение `NovaSSH`, DLL/so: `nova_core`.
 
+## Скачать (v0.5.0)
+
+- **Windows, установщик:** [NovaSSH-0.5.0-windows-x64-installer.exe](https://github.com/xxxronelxxx/NovaSSH/releases/download/v0.5.0/NovaSSH-0.5.0-windows-x64-installer.exe) · 15,9 МБ
+- **Windows, portable:** [NovaSSH-0.5.0-windows-x64-portable.zip](https://github.com/xxxronelxxx/NovaSSH/releases/download/v0.5.0/NovaSSH-0.5.0-windows-x64-portable.zip) · 21 МБ
+- **Android, universal APK:** [NovaSSH-0.5.0-universal.apk](https://github.com/xxxronelxxx/NovaSSH/releases/download/v0.5.0/NovaSSH-0.5.0-universal.apk) · arm64-v8a + armeabi-v7a + x86_64
+
+[Страница релизов](https://github.com/xxxronelxxx/NovaSSH/releases) · [контрольные суммы](https://github.com/xxxronelxxx/NovaSSH/releases/download/v0.5.0/SHA256SUMS-0.5.0.txt)
+
+Установщик ставится без администратора в `%LOCALAPPDATA%\Programs\NovaSSH`.
+Portable-архив распаковывается в любую папку и хранит профиль рядом с `NovaSSH.exe`.
+
 
 ## Быстрый старт
 
