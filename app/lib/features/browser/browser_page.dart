@@ -1043,7 +1043,8 @@ class _BrowserPageState extends State<BrowserPage> {
         }
         _syncTransferService();
         if (event.state == TransferState.done ||
-            event.state == TransferState.failed) {
+            event.state == TransferState.failed ||
+            event.state == TransferState.cancelled) {
           Timer(const Duration(seconds: 5), () {
             if (mounted) {
               setState(() => _transfers.removeWhere((t) => t.id == event.id));

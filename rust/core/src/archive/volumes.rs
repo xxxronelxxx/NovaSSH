@@ -43,8 +43,8 @@ pub fn detect(paths: &[String]) -> Option<VolumeSet> {
 
     let parts: Vec<String> = items.into_iter().map(|(_, path)| path).collect();
     let mut target_name = target?;
-    // Split ZIP and old RAR sets include the final file itself, so the joined
-    // copy must not take its name.
+    // A split ZIP includes the final `.zip` itself, so the joined copy must
+    // not take its name.
     if paths
         .iter()
         .any(|path| util::file_name(path).eq_ignore_ascii_case(&target_name))
