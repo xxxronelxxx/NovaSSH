@@ -71,7 +71,7 @@ class NovaCore
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 1564625196;
+  int get rustContentHash => 258151604;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -108,7 +108,7 @@ abstract class NovaCoreApi extends BaseApi {
 
   Future<void> crateApiCancelArchiveJob({required String jobId});
 
-  Future<void> crateApiCancelArchiveRead({required String token});
+  Future<void> crateApiCancelArchiveTask({required String token});
 
   Future<void> crateApiCancelConnect({required String serverId});
 
@@ -179,13 +179,14 @@ abstract class NovaCoreApi extends BaseApi {
     required String archivePath,
     required String inner,
     String? format,
+    String? token,
   });
 
   Future<int> crateApiCreateArchive({
-    String? sessionId,
     required List<String> sources,
     required String targetPath,
     String? format,
+    String? token,
   });
 
   Future<void> crateApiCreateVault({required String password});
@@ -321,6 +322,13 @@ abstract class NovaCoreApi extends BaseApi {
     required String sessionId,
     required int cols,
     required int rows,
+  });
+
+  Stream<TransferEvent> crateApiPackServerArchive({
+    required String sessionId,
+    required List<String> sources,
+    required String targetPath,
+    String? format,
   });
 
   Future<PanelSettings> crateModelPanelSettingsDefault();
@@ -718,7 +726,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
       const TaskConstMeta(debugName: "cancel_archive_job", argNames: ["jobId"]);
 
   @override
-  Future<void> crateApiCancelArchiveRead({required String token}) {
+  Future<void> crateApiCancelArchiveTask({required String token}) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
@@ -735,15 +743,15 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: sse_decode_String,
         ),
-        constMeta: kCrateApiCancelArchiveReadConstMeta,
+        constMeta: kCrateApiCancelArchiveTaskConstMeta,
         argValues: [token],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiCancelArchiveReadConstMeta => const TaskConstMeta(
-    debugName: "cancel_archive_read",
+  TaskConstMeta get kCrateApiCancelArchiveTaskConstMeta => const TaskConstMeta(
+    debugName: "cancel_archive_task",
     argNames: ["token"],
   );
 
@@ -1270,6 +1278,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
     required String archivePath,
     required String inner,
     String? format,
+    String? token,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -1280,6 +1289,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           sse_encode_String(archivePath, serializer);
           sse_encode_String(inner, serializer);
           sse_encode_opt_String(format, serializer);
+          sse_encode_opt_String(token, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1292,7 +1302,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCopyToArchiveConstMeta,
-        argValues: [sessionId, sources, archivePath, inner, format],
+        argValues: [sessionId, sources, archivePath, inner, format, token],
         apiImpl: this,
       ),
     );
@@ -1300,24 +1310,31 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
 
   TaskConstMeta get kCrateApiCopyToArchiveConstMeta => const TaskConstMeta(
     debugName: "copy_to_archive",
-    argNames: ["sessionId", "sources", "archivePath", "inner", "format"],
+    argNames: [
+      "sessionId",
+      "sources",
+      "archivePath",
+      "inner",
+      "format",
+      "token",
+    ],
   );
 
   @override
   Future<int> crateApiCreateArchive({
-    String? sessionId,
     required List<String> sources,
     required String targetPath,
     String? format,
+    String? token,
   }) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_opt_String(sessionId, serializer);
           sse_encode_list_String(sources, serializer);
           sse_encode_String(targetPath, serializer);
           sse_encode_opt_String(format, serializer);
+          sse_encode_opt_String(token, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -1330,7 +1347,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiCreateArchiveConstMeta,
-        argValues: [sessionId, sources, targetPath, format],
+        argValues: [sources, targetPath, format, token],
         apiImpl: this,
       ),
     );
@@ -1338,7 +1355,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
 
   TaskConstMeta get kCrateApiCreateArchiveConstMeta => const TaskConstMeta(
     debugName: "create_archive",
-    argNames: ["sessionId", "sources", "targetPath", "format"],
+    argNames: ["sources", "targetPath", "format", "token"],
   );
 
   @override
@@ -2683,6 +2700,49 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
   );
 
   @override
+  Stream<TransferEvent> crateApiPackServerArchive({
+    required String sessionId,
+    required List<String> sources,
+    required String targetPath,
+    String? format,
+  }) {
+    final sink = RustStreamSink<TransferEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_String(sessionId, serializer);
+            sse_encode_list_String(sources, serializer);
+            sse_encode_String(targetPath, serializer);
+            sse_encode_opt_String(format, serializer);
+            sse_encode_StreamSink_transfer_event_Sse(sink, serializer);
+            pdeCallFfi(
+              generalizedFrbRustBinding,
+              serializer,
+              funcId: 72,
+              port: port_,
+            );
+          },
+          codec: SseCodec(
+            decodeSuccessData: sse_decode_unit,
+            decodeErrorData: sse_decode_String,
+          ),
+          constMeta: kCrateApiPackServerArchiveConstMeta,
+          argValues: [sessionId, sources, targetPath, format, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
+
+  TaskConstMeta get kCrateApiPackServerArchiveConstMeta => const TaskConstMeta(
+    debugName: "pack_server_archive",
+    argNames: ["sessionId", "sources", "targetPath", "format", "sink"],
+  );
+
+  @override
   Future<PanelSettings> crateModelPanelSettingsDefault() {
     return handler.executeNormal(
       NormalTask(
@@ -2691,7 +2751,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 72,
+            funcId: 73,
             port: port_,
           );
         },
@@ -2718,7 +2778,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 73,
+            funcId: 74,
             port: port_,
           );
         },
@@ -2746,7 +2806,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 74,
+            funcId: 75,
             port: port_,
           );
         },
@@ -2780,7 +2840,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 75,
+            funcId: 76,
             port: port_,
           );
         },
@@ -2818,7 +2878,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 76,
+            funcId: 77,
             port: port_,
           );
         },
@@ -2854,7 +2914,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 77,
+            funcId: 78,
             port: port_,
           );
         },
@@ -2884,7 +2944,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 78,
+            funcId: 79,
             port: port_,
           );
         },
@@ -2914,7 +2974,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 79,
+            funcId: 80,
             port: port_,
           );
         },
@@ -2948,7 +3008,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 80,
+            funcId: 81,
             port: port_,
           );
         },
@@ -2984,7 +3044,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 81,
+            funcId: 82,
             port: port_,
           );
         },
@@ -3020,7 +3080,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 82,
+            funcId: 83,
             port: port_,
           );
         },
@@ -3056,7 +3116,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 83,
+            funcId: 84,
             port: port_,
           );
         },
@@ -3086,7 +3146,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 84,
+            funcId: 85,
             port: port_,
           );
         },
@@ -3116,7 +3176,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 85,
+            funcId: 86,
             port: port_,
           );
         },
@@ -3144,7 +3204,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 86,
+            funcId: 87,
             port: port_,
           );
         },
@@ -3172,7 +3232,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 87,
+            funcId: 88,
             port: port_,
           );
         },
@@ -3202,7 +3262,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 88,
+            funcId: 89,
             port: port_,
           );
         },
@@ -3232,7 +3292,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 89,
+            funcId: 90,
             port: port_,
           );
         },
@@ -3260,7 +3320,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 90,
+            funcId: 91,
             port: port_,
           );
         },
@@ -3288,7 +3348,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 91,
+            funcId: 92,
             port: port_,
           );
         },
@@ -3316,7 +3376,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 92,
+            funcId: 93,
             port: port_,
           );
         },
@@ -3345,7 +3405,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 93,
+            funcId: 94,
             port: port_,
           );
         },
@@ -3372,7 +3432,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 94,
+            funcId: 95,
             port: port_,
           );
         },
@@ -3399,7 +3459,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 95,
+            funcId: 96,
             port: port_,
           );
         },
@@ -3427,7 +3487,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 96,
+            funcId: 97,
             port: port_,
           );
         },
@@ -3454,7 +3514,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 97,
+            funcId: 98,
             port: port_,
           );
         },
@@ -3483,7 +3543,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 98,
+            funcId: 99,
             port: port_,
           );
         },
@@ -3511,7 +3571,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 99,
+            funcId: 100,
             port: port_,
           );
         },
@@ -3540,7 +3600,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 100,
+            funcId: 101,
             port: port_,
           );
         },
@@ -3568,7 +3628,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 101,
+            funcId: 102,
             port: port_,
           );
         },
@@ -3596,7 +3656,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 102,
+            funcId: 103,
             port: port_,
           );
         },
@@ -3628,7 +3688,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 103,
+            funcId: 104,
             port: port_,
           );
         },
@@ -3657,7 +3717,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 104,
+            funcId: 105,
             port: port_,
           );
         },
@@ -3684,7 +3744,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 105,
+            funcId: 106,
             port: port_,
           );
         },
@@ -3711,7 +3771,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 106,
+            funcId: 107,
             port: port_,
           );
         },
@@ -3738,7 +3798,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 107,
+            funcId: 108,
             port: port_,
           );
         },
@@ -3766,7 +3826,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 108,
+            funcId: 109,
             port: port_,
           );
         },
@@ -3795,7 +3855,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 109,
+            funcId: 110,
             port: port_,
           );
         },
@@ -3823,7 +3883,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 110,
+            funcId: 111,
             port: port_,
           );
         },
@@ -3863,7 +3923,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 111,
+            funcId: 112,
             port: port_,
           );
         },
@@ -3892,7 +3952,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 112,
+            funcId: 113,
             port: port_,
           );
         },
@@ -3919,7 +3979,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 113,
+            funcId: 114,
             port: port_,
           );
         },
@@ -3966,7 +4026,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 114,
+              funcId: 115,
               port: port_,
             );
           },
@@ -4017,7 +4077,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 115,
+            funcId: 116,
             port: port_,
           );
         },
@@ -4049,7 +4109,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 116,
+            funcId: 117,
             port: port_,
           );
         },
@@ -4079,7 +4139,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 117,
+            funcId: 118,
             port: port_,
           );
         },
@@ -4106,7 +4166,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 118,
+            funcId: 119,
             port: port_,
           );
         },
@@ -4147,7 +4207,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 119,
+              funcId: 120,
               port: port_,
             );
           },
@@ -4186,7 +4246,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 120,
+            funcId: 121,
             port: port_,
           );
         },
@@ -4223,7 +4283,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 121,
+            funcId: 122,
             port: port_,
           );
         },
@@ -4252,7 +4312,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 122,
+            funcId: 123,
             port: port_,
           );
         },
@@ -4279,7 +4339,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 123,
+            funcId: 124,
             port: port_,
           );
         },
@@ -4306,7 +4366,7 @@ class NovaCoreApiImpl extends NovaCoreApiImplPlatform implements NovaCoreApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 124,
+            funcId: 125,
             port: port_,
           );
         },

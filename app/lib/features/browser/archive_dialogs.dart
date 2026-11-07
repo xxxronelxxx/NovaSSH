@@ -185,7 +185,7 @@ class _ServerArchiveDialogState extends State<ServerArchiveDialog> {
             ),
             const SizedBox(height: 6),
             Text(
-              'Файлы распаковываются на сервере в /tmp и удаляются вместе с сессией.',
+              'Операция выполняется на сервере; «Отмена» останавливает её.',
               style: TextStyle(fontSize: 10.5, color: T.faint),
             ),
           ],

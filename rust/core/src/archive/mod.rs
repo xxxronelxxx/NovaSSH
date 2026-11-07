@@ -24,10 +24,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-pub use create::{append_archive, create_archive, CreateReport};
+pub use create::{append_archive, append_archive_cancellable, create_archive, create_archive_cancellable, CreateReport};
 pub use format::ArchiveFormat;
 pub use index::{ArchiveIndex, ArchiveNode, RawEntry};
-pub use remote::{extract_command, extract_tool_command, pack_command, short_error};
+pub use remote::{extract_command, extract_tool_command, pack_command, pack_plan, short_error, PackPlan};
 pub use volumes::{assemble_command, assemble_local, detect as detect_volumes, VolumeSet};
 
 use crate::error::{NovaError, Result};

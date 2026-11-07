@@ -56,12 +56,22 @@ fn relative_to(parent: &str, path: &str) -> String {
     }
 }
 
-/// Command that creates `target` from `sources` (absolute server paths).
-pub fn pack_command(
+/// Everything the server needs to create one archive.
+pub struct PackPlan {
+    /// Directory the tool must run in (the common parent of the sources).
+    pub parent: String,
+    /// Temporary file next to the target; renamed on success.
+    pub partial: String,
+    /// Tool invocation writing into `partial`; expects cwd = `parent`.
+    pub tool: String,
+}
+
+/// Builds the tool command that writes `target` from `sources`.
+pub fn pack_plan(
     format: ArchiveFormat,
     sources: &[String],
     target: &str,
-) -> Result<String> {
+) -> Result<PackPlan> {
     if sources.is_empty() {
         return Err(NovaError::Invalid("Нечего упаковывать".into()));
     }
@@ -79,50 +89,63 @@ pub fn pack_command(
         .collect();
     names.dedup();
 
-    let quoted_target = quote(target);
     // Tools write next to the target and the file is renamed at the end: a
     // failed run never leaves a truncated archive under the real name, and
     // `zip` cannot pick up the archive it is writing.
-    let partial_path = format!("{target}.nova-part");
-    let quoted_partial = quote(&partial_path);
-    let quoted_parent = quote(&parent);
-    let target_parent = quote(&util::parent(target).unwrap_or_else(|| "/".into()));
+    let partial = format!("{target}.nova-part");
+    let quoted_partial = quote(&partial);
     let quoted_names = names
         .iter()
         .map(|name| quote(name))
         .collect::<Vec<_>>()
         .join(" ");
 
-    let build = match format {
-        ArchiveFormat::Zip => format!(
-            "cd {quoted_parent} && zip -r -q {quoted_partial} {quoted_names}"
-        ),
-        ArchiveFormat::SevenZ => format!(
-            "cd {quoted_parent} && 7z a -bd -y {quoted_partial} {quoted_names}"
-        ),
+    let tool = match format {
+        ArchiveFormat::Zip => format!("zip -r -q {quoted_partial} {quoted_names}"),
+        ArchiveFormat::SevenZ => format!("7z a -bd -y {quoted_partial} {quoted_names}"),
         ArchiveFormat::Tar
         | ArchiveFormat::TarGz
         | ArchiveFormat::TarBz2
         | ArchiveFormat::TarXz
         | ArchiveFormat::TarZst => format!(
-            "cd {quoted_parent} && tar {flags} {quoted_partial} {quoted_names}",
+            "tar {flags} {quoted_partial} {quoted_names}",
             flags = tar_create_flags(format),
         ),
         ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst => {
-            let tool = match format {
+            let compressor = match format {
                 ArchiveFormat::Gz => "gzip",
                 ArchiveFormat::Bz2 => "bzip2",
                 ArchiveFormat::Xz => "xz",
                 _ => "zstd",
             };
             format!(
-                "cd {quoted_parent} && {tool} -c {source} > {quoted_partial}",
+                "{compressor} -c {source} > {quoted_partial}",
                 source = quote(&names[0]),
             )
         }
     };
+
+    Ok(PackPlan {
+        parent,
+        partial,
+        tool,
+    })
+}
+
+/// One-shot command used by tests and the synchronous path.
+pub fn pack_command(
+    format: ArchiveFormat,
+    sources: &[String],
+    target: &str,
+) -> Result<String> {
+    let plan = pack_plan(format, sources, target)?;
+    let target_parent = quote(&util::parent(target).unwrap_or_else(|| "/".into()));
     Ok(format!(
-        "mkdir -p {target_parent} && {build} && mv -f {quoted_partial} {quoted_target}"
+        "mkdir -p {target_parent} && cd {parent} && {tool} && mv -f {partial} {target}",
+        parent = quote(&plan.parent),
+        tool = plan.tool,
+        partial = quote(&plan.partial),
+        target = quote(target),
     ))
 }
 

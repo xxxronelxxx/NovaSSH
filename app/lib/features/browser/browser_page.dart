@@ -1454,7 +1454,7 @@ class _BrowserPageState extends State<BrowserPage> {
                 maxBytes: 262144,
                 token: token,
               ),
-              onCancel: () => unawaited(cancelArchiveRead(token: token)),
+              onCancel: () => unawaited(cancelArchiveTask(token: token)),
             )
           : await preview(
               sessionId: pane.scope == 'remote' ? _sessionId : null,
@@ -3196,21 +3196,54 @@ class _BrowserPageState extends State<BrowserPage> {
 
     final remote = pane.scope == 'remote';
     final targetPath = joinPath(pane.path, choice.name);
+    final sources = [for (final entry in items) entry.path];
+
+    if (remote) {
+      final stream = packServerArchive(
+        sessionId: _tabOf(pane).connection.sessionId,
+        sources: sources,
+        targetPath: targetPath,
+        format: choice.format,
+      );
+      final result = await showDialog<ServerArchiveResult>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) =>
+            ServerArchiveDialog(stream: stream, title: 'Упаковка на сервере'),
+      );
+      if (!mounted) return;
+      if (result == null || result.cancelled) {
+        _toast('Упаковка отменена');
+        return;
+      }
+      if (!result.ok) {
+        _toast('Архив: ${result.error ?? 'не удалось упаковать'}', warn: true);
+        return;
+      }
+      _toast('Архив ${choice.name} создан на сервере');
+      await _load(pane, pane.path);
+      return;
+    }
+
+    final token = 'arc_${DateTime.now().microsecondsSinceEpoch}';
     try {
       final count = await _withArchiveBusy(
-        remote ? 'Упаковываю на сервере…' : 'Упаковываю…',
+        'Упаковываю…',
         () => createArchive(
-          sessionId: remote ? _tabOf(pane).connection.sessionId : null,
-          sources: [for (final entry in items) entry.path],
+          sources: sources,
           targetPath: targetPath,
           format: choice.format,
+          token: token,
         ),
+        onCancel: () => unawaited(cancelArchiveTask(token: token)),
       );
-      _toast(remote
-          ? 'Архив ${choice.name} создан на сервере · объектов: $count'
-          : 'Создан архив ${choice.name} · файлов: $count');
+      _toast('Создан архив ${choice.name} · файлов: $count');
       await _load(pane, pane.path);
     } catch (e) {
+      if ('$e'.contains('__cancelled__')) {
+        _toast('Упаковка отменена');
+        return;
+      }
       _toast('Архив: ${friendlyError(e)}', warn: true);
     }
   }
@@ -3238,6 +3271,7 @@ class _BrowserPageState extends State<BrowserPage> {
       caseSensitive: false,
     ).hasMatch(archiveName);
     try {
+      final token = 'add_${DateTime.now().microsecondsSinceEpoch}';
       final count = await _withArchiveBusy(
         appendable ? 'Добавляю в $archiveName…' : 'Пересобираю $archiveName…',
         () => copyToArchive(
@@ -3246,11 +3280,18 @@ class _BrowserPageState extends State<BrowserPage> {
           archivePath: target.archivePath!,
           inner: inner,
           format: null,
+          token: token,
         ),
+        onCancel: () => unawaited(cancelArchiveTask(token: token)),
       );
       _toast('Добавлено в архив · файлов: $count');
       await _load(target, target.path);
     } catch (e) {
+      if ('$e'.contains('__cancelled__')) {
+        _toast('Добавление отменено');
+        await _load(target, target.path);
+        return;
+      }
       _toast('В архив: ${friendlyError(e)}', warn: true);
     }
   }

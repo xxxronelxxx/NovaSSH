@@ -17,6 +17,37 @@ use crate::util;
 pub struct CreateReport {
     pub files: u32,
     pub bytes: u64,
+    /// The user stopped an in-place append; the archive is still valid and
+    /// contains everything written before the stop.
+    pub cancelled: bool,
+}
+
+fn cancelled_error() -> NovaError {
+    NovaError::Invalid("__cancelled__".into())
+}
+
+/// Wraps a reader so a long file can be interrupted between chunks.
+struct CancelReader<'a, R> {
+    inner: R,
+    cancelled: &'a dyn Fn() -> bool,
+}
+
+impl<'a, R: Read> CancelReader<'a, R> {
+    fn new(inner: R, cancelled: &'a dyn Fn() -> bool) -> Self {
+        Self { inner, cancelled }
+    }
+}
+
+impl<R: Read> Read for CancelReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if (self.cancelled)() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "__cancelled__",
+            ));
+        }
+        self.inner.read(buf)
+    }
 }
 
 struct Item {
@@ -28,10 +59,15 @@ struct Item {
 
 /// Walks the selected paths and returns their flat, root-relative layout.
 fn collect(sources: &[String], target: &str) -> Result<Vec<Item>> {
-    collect_with_prefix(sources, target, "")
+    collect_with_prefix(sources, target, "", &|| false)
 }
 
-fn collect_with_prefix(sources: &[String], target: &str, prefix: &str) -> Result<Vec<Item>> {
+fn collect_with_prefix(
+    sources: &[String],
+    target: &str,
+    prefix: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Item>> {
     let target_path = Path::new(target);
     let mut out = Vec::new();
     let mut stack: Vec<(PathBuf, String)> = Vec::new();
@@ -52,6 +88,9 @@ fn collect_with_prefix(sources: &[String], target: &str, prefix: &str) -> Result
 
     let mut guard = 0usize;
     while let Some((abs, name)) = stack.pop() {
+        if cancelled() {
+            return Err(cancelled_error());
+        }
         guard += 1;
         if guard > 200_000 {
             return Err(NovaError::Invalid("слишком много файлов для архива".into()));
@@ -105,6 +144,17 @@ pub fn create_archive(
     sources: &[String],
     target: &str,
 ) -> Result<CreateReport> {
+    create_archive_cancellable(format, sources, target, &|| false)
+}
+
+/// Same as [`create_archive`], but stops when `cancelled` turns true. The
+/// half-written `.nova-part` file is removed, so the target is untouched.
+pub fn create_archive_cancellable(
+    format: Option<ArchiveFormat>,
+    sources: &[String],
+    target: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CreateReport> {
     if sources.is_empty() {
         return Err(NovaError::Invalid("Нечего упаковывать".into()));
     }
@@ -115,7 +165,7 @@ pub fn create_archive(
         })?,
     };
 
-    let items = collect(sources, target)?;
+    let items = collect_with_prefix(sources, target, "", cancelled)?;
     if format.is_single() && (items.iter().filter(|i| !i.is_dir).count() != 1 || items.len() != 1) {
         return Err(NovaError::Invalid(format!(
             "{} сжимает ровно один файл",
@@ -128,10 +178,10 @@ pub fn create_archive(
     let partial = format!("{target}.nova-part");
     let _ = std::fs::remove_file(&partial);
     let result = match format {
-        ArchiveFormat::Zip => write_zip(&items, &partial),
-        ArchiveFormat::SevenZ => write_7z(&items, &partial),
-        f if f.is_tar() => write_tar(&items, &partial, f),
-        f if f.is_single() => write_single(&items, &partial, f),
+        ArchiveFormat::Zip => write_zip(&items, &partial, cancelled),
+        ArchiveFormat::SevenZ => write_7z(&items, &partial, cancelled),
+        f if f.is_tar() => write_tar(&items, &partial, f, cancelled),
+        f if f.is_single() => write_single(&items, &partial, f, cancelled),
         other => Err(NovaError::Unsupported(format!(
             "{} is not supported",
             other.label()
@@ -162,13 +212,26 @@ pub fn append_archive(
     archive_path: &str,
     sources: &[String],
 ) -> Result<CreateReport> {
+    append_archive_cancellable(format, archive_path, sources, &|| false)
+}
+
+/// Appends between whole files only: a half-written member would corrupt the
+/// archive, so the current file always finishes.
+pub fn append_archive_cancellable(
+    format: ArchiveFormat,
+    archive_path: &str,
+    sources: &[String],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CreateReport> {
     if sources.is_empty() {
         return Err(NovaError::Invalid("Нечего добавлять".into()));
     }
+    // Collecting the list is instant; cancellation applies to writing, where
+    // it can actually take minutes.
     let items = collect(sources, archive_path)?;
     match format {
-        ArchiveFormat::Zip => append_zip(&items, archive_path),
-        ArchiveFormat::Tar => append_tar(&items, archive_path),
+        ArchiveFormat::Zip => append_zip(&items, archive_path, cancelled),
+        ArchiveFormat::Tar => append_tar(&items, archive_path, cancelled),
         other => Err(NovaError::Unsupported(format!(
             "{} нельзя дополнить на месте",
             other.label()
@@ -176,7 +239,11 @@ pub fn append_archive(
     }
 }
 
-fn append_zip(items: &[Item], target: &str) -> Result<CreateReport> {
+fn append_zip(
+    items: &[Item],
+    target: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CreateReport> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -188,6 +255,10 @@ fn append_zip(items: &[Item], target: &str) -> Result<CreateReport> {
 
     let mut report = CreateReport::default();
     for item in items {
+        if cancelled() {
+            report.cancelled = true;
+            break;
+        }
         if item.is_dir {
             zip.add_directory(format!("{}/", item.name.trim_end_matches('/')), options)
                 .map_err(|e| NovaError::Invalid(e.to_string()))?;
@@ -196,14 +267,18 @@ fn append_zip(items: &[Item], target: &str) -> Result<CreateReport> {
         zip.start_file(item.name.clone(), options)
             .map_err(|e| NovaError::Invalid(e.to_string()))?;
         let mut reader = File::open(&item.abs)?;
-        copy_into(&mut reader, &mut zip, &mut report)?;
+        copy_into(&mut reader, &mut zip, &mut report, &|| false)?;
     }
     zip.finish()
         .map_err(|e| NovaError::Invalid(format!("zip: {e}")))?;
     Ok(report)
 }
 
-fn append_tar(items: &[Item], target: &str) -> Result<CreateReport> {
+fn append_tar(
+    items: &[Item],
+    target: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CreateReport> {
     use std::io::{Seek, SeekFrom};
 
     // Find where the last member ends, drop the trailing zero blocks and
@@ -234,6 +309,10 @@ fn append_tar(items: &[Item], target: &str) -> Result<CreateReport> {
     let mut report = CreateReport::default();
     let mut builder = tar::Builder::new(file);
     for item in items {
+        if cancelled() {
+            report.cancelled = true;
+            break;
+        }
         builder
             .append_path_with_name(&item.abs, &item.name)
             .map_err(|e| NovaError::Invalid(format!("{}: {e}", item.name)))?;
@@ -242,11 +321,16 @@ fn append_tar(items: &[Item], target: &str) -> Result<CreateReport> {
             report.bytes += item.size;
         }
     }
+    // Always finish: the end-of-archive marker keeps a partial append usable.
     builder.finish()?;
     Ok(report)
 }
 
-fn write_zip(items: &[Item], target: &str) -> Result<CreateReport> {
+fn write_zip(
+    items: &[Item],
+    target: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CreateReport> {
     let file = File::create(target)?;
     let mut zip = zip::ZipWriter::new(file);
     let options = zip::write::SimpleFileOptions::default()
@@ -254,6 +338,9 @@ fn write_zip(items: &[Item], target: &str) -> Result<CreateReport> {
 
     let mut report = CreateReport::default();
     for item in items {
+        if cancelled() {
+            return Err(cancelled_error());
+        }
         if item.is_dir {
             zip.add_directory(format!("{}/", item.name.trim_end_matches('/')), options)
                 .map_err(|e| NovaError::Invalid(e.to_string()))?;
@@ -262,13 +349,18 @@ fn write_zip(items: &[Item], target: &str) -> Result<CreateReport> {
         zip.start_file(item.name.clone(), options)
             .map_err(|e| NovaError::Invalid(e.to_string()))?;
         let mut reader = File::open(&item.abs)?;
-        copy_into(&mut reader, &mut zip, &mut report)?;
+        copy_into(&mut reader, &mut zip, &mut report, cancelled)?;
     }
     zip.finish().map_err(|e| NovaError::Invalid(e.to_string()))?;
     Ok(report)
 }
 
-fn write_tar(items: &[Item], target: &str, format: ArchiveFormat) -> Result<CreateReport> {
+fn write_tar(
+    items: &[Item],
+    target: &str,
+    format: ArchiveFormat,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CreateReport> {
     let file = File::create(target)?;
     let mut report = CreateReport::default();
 
@@ -276,10 +368,23 @@ fn write_tar(items: &[Item], target: &str, format: ArchiveFormat) -> Result<Crea
         ($writer:expr, $finish:expr) => {{
             let mut builder = tar::Builder::new($writer);
             for item in items {
-                builder
-                    .append_path_with_name(&item.abs, &item.name)
-                    .map_err(|e| NovaError::Invalid(format!("{}: {e}", item.name)))?;
-                if !item.is_dir {
+                if cancelled() {
+                    return Err(cancelled_error());
+                }
+                if item.is_dir {
+                    builder
+                        .append_path_with_name(&item.abs, &item.name)
+                        .map_err(|e| NovaError::Invalid(format!("{}: {e}", item.name)))?;
+                } else {
+                    let meta = std::fs::metadata(&item.abs)?;
+                    let mut header = tar::Header::new_gnu();
+                    header.set_metadata(&meta);
+                    header.set_size(meta.len());
+                    header.set_cksum();
+                    let reader = CancelReader::new(File::open(&item.abs)?, cancelled);
+                    builder
+                        .append_data(&mut header, &item.name, reader)
+                        .map_err(|e| NovaError::Invalid(format!("{}: {e}", item.name)))?;
                     report.files += 1;
                     report.bytes += item.size;
                 }
@@ -333,13 +438,20 @@ fn write_tar(items: &[Item], target: &str, format: ArchiveFormat) -> Result<Crea
     Ok(report)
 }
 
-fn write_7z(items: &[Item], target: &str) -> Result<CreateReport> {
+fn write_7z(
+    items: &[Item],
+    target: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CreateReport> {
     use sevenz_rust2::{SevenZArchiveEntry, SevenZWriter};
 
     let mut writer = SevenZWriter::create(target)
         .map_err(|e| NovaError::Invalid(format!("7z: {e}")))?;
     let mut report = CreateReport::default();
     for item in items {
+        if cancelled() {
+            return Err(cancelled_error());
+        }
         if item.is_dir {
             let entry = SevenZArchiveEntry::new_folder(item.name.trim_end_matches('/'));
             writer
@@ -348,7 +460,7 @@ fn write_7z(items: &[Item], target: &str) -> Result<CreateReport> {
             continue;
         }
         let entry = SevenZArchiveEntry::from_path(&item.abs, item.name.clone());
-        let reader = File::open(&item.abs)?;
+        let reader = CancelReader::new(File::open(&item.abs)?, cancelled);
         writer
             .push_archive_entry(entry, Some(reader))
             .map_err(|e| NovaError::Invalid(format!("{}: {e}", item.name)))?;
@@ -361,7 +473,12 @@ fn write_7z(items: &[Item], target: &str) -> Result<CreateReport> {
     Ok(report)
 }
 
-fn write_single(items: &[Item], target: &str, format: ArchiveFormat) -> Result<CreateReport> {
+fn write_single(
+    items: &[Item],
+    target: &str,
+    format: ArchiveFormat,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<CreateReport> {
     let Some(item) = items.iter().find(|item| !item.is_dir) else {
         return Err(NovaError::Invalid("выберите файл".into()));
     };
@@ -376,23 +493,23 @@ fn write_single(items: &[Item], target: &str, format: ArchiveFormat) -> Result<C
             let mut encoder = flate2::GzBuilder::new()
                 .filename(util::file_name(&item.abs.to_string_lossy()))
                 .write(file, flate2::Compression::default());
-            copy_into(&mut reader, &mut encoder, &mut report)?;
+            copy_into(&mut reader, &mut encoder, &mut report, cancelled)?;
             encoder.finish()?;
         }
         ArchiveFormat::Bz2 => {
             let mut encoder = bzip2::write::BzEncoder::new(file, bzip2::Compression::default());
-            copy_into(&mut reader, &mut encoder, &mut report)?;
+            copy_into(&mut reader, &mut encoder, &mut report, cancelled)?;
             encoder.finish()?;
         }
         ArchiveFormat::Xz => {
             let mut encoder = liblzma::write::XzEncoder::new(file, 6);
-            copy_into(&mut reader, &mut encoder, &mut report)?;
+            copy_into(&mut reader, &mut encoder, &mut report, cancelled)?;
             encoder.finish()?;
         }
         ArchiveFormat::Zst => {
             let mut encoder = zstd::stream::write::Encoder::new(file, 3)
                 .map_err(|e| NovaError::Invalid(format!("zstd: {e}")))?;
-            copy_into(&mut reader, &mut encoder, &mut report)?;
+            copy_into(&mut reader, &mut encoder, &mut report, cancelled)?;
             encoder.finish()?;
         }
         other => {
@@ -405,9 +522,17 @@ fn write_single(items: &[Item], target: &str, format: ArchiveFormat) -> Result<C
     Ok(report)
 }
 
-fn copy_into(reader: &mut impl Read, writer: &mut impl Write, report: &mut CreateReport) -> Result<()> {
+fn copy_into(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    report: &mut CreateReport,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<()> {
     let mut chunk = vec![0u8; 128 * 1024];
     loop {
+        if cancelled() {
+            return Err(cancelled_error());
+        }
         let read = reader.read(&mut chunk)?;
         if read == 0 {
             break;
@@ -496,6 +621,46 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("нельзя дополнить"));
+    }
+
+    #[test]
+    fn cancelled_create_leaves_no_file_behind() {
+        let (dir, sources) = fixture();
+        let target = dir.path().join("cancelled.zip").to_string_lossy().to_string();
+        let error = create_archive_cancellable(
+            Some(ArchiveFormat::Zip),
+            &sources,
+            &target,
+            &|| true,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!std::path::Path::new(&target).exists());
+        assert!(!std::path::Path::new(&format!("{target}.nova-part")).exists());
+    }
+
+    #[test]
+    fn cancelled_append_keeps_the_archive_valid() {
+        let (dir, sources) = fixture();
+        let target = dir.path().join("append-cancel.zip").to_string_lossy().to_string();
+        create_archive(Some(ArchiveFormat::Zip), &sources, &target).unwrap();
+
+        let extra = dir.path().join("extra.txt");
+        std::fs::write(&extra, b"gamma").unwrap();
+        let report = append_archive_cancellable(
+            ArchiveFormat::Zip,
+            &target,
+            &[extra.to_string_lossy().to_string()],
+            &|| true,
+        )
+        .unwrap();
+        assert!(report.cancelled);
+        assert_eq!(report.files, 0);
+
+        // The original archive is still readable and unchanged.
+        let archive = crate::archive::ArchiveFs::open(&target).unwrap();
+        assert_eq!(archive.read_entry("src/b.txt").unwrap(), b"beta");
+        assert!(archive.read_entry("extra.txt").is_err());
     }
 
     #[test]

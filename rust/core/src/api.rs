@@ -1838,18 +1838,47 @@ pub fn list_archive(
     archive.list(&inner, show_hidden).map_err(String::from)
 }
 
-fn preview_cancels() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+/// Cancellation marker shared by every cancelling archive call. The UI
+/// treats it as "the user stopped this", not as an error.
+const ARCHIVE_CANCELLED: &str = "__cancelled__";
+
+fn archive_cancel_tokens() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static TOKENS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
     TOKENS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
 }
 
-/// Stops a preview that is still decompressing.
-pub fn cancel_archive_read(token: String) -> Result<(), String> {
-    if let Ok(mut tokens) = preview_cancels().lock() {
+/// Asks the local archive call that owns `token` to stop.
+pub fn cancel_archive_task(token: String) -> Result<(), String> {
+    if let Ok(mut tokens) = archive_cancel_tokens().lock() {
         tokens.insert(token);
     }
     Ok(())
+}
+
+fn task_cancelled(token: &Option<String>) -> bool {
+    token
+        .as_ref()
+        .map(|token| {
+            archive_cancel_tokens()
+                .lock()
+                .map(|tokens| tokens.contains(token))
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
+/// Drops the token when the call returns, however it returns.
+struct ArchiveTokenGuard(Option<String>);
+
+impl Drop for ArchiveTokenGuard {
+    fn drop(&mut self) {
+        if let Some(token) = &self.0 {
+            if let Ok(mut tokens) = archive_cancel_tokens().lock() {
+                tokens.remove(token);
+            }
+        }
+    }
 }
 
 /// Text preview of an entry inside an archive (F3).
@@ -1863,24 +1892,11 @@ pub fn preview_archive(
     token: Option<String>,
 ) -> Result<String, String> {
     let archive = open_archive(&archive_path)?;
-    let cancelled = || {
-        token
-            .as_ref()
-            .map(|token| {
-                preview_cancels()
-                    .lock()
-                    .map(|tokens| tokens.contains(token))
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
-    };
-    let result = archive.read_entry_cancellable(&inner, max_bytes as u64, &cancelled);
-    if let Some(token) = &token {
-        if let Ok(mut tokens) = preview_cancels().lock() {
-            tokens.remove(token);
-        }
-    }
-    let bytes = result.map_err(archive_error)?;
+    let cancelled = || task_cancelled(&token);
+    let _guard = ArchiveTokenGuard(token.clone());
+    let bytes = archive
+        .read_entry_cancellable(&inner, max_bytes as u64, &cancelled)
+        .map_err(archive_error)?;
     let take = bytes.len().min(max_bytes as usize);
     Ok(String::from_utf8_lossy(&bytes[..take]).to_string())
 }
@@ -2544,10 +2560,10 @@ pub fn import_sync(json: String) -> Result<SyncReport, String> {
 /// Returns the number of files written (remote: the number of sources, since
 /// the server does not report a count).
 pub fn create_archive(
-    session_id: Option<String>,
     sources: Vec<String>,
     target_path: String,
     format: Option<String>,
+    token: Option<String>,
 ) -> Result<u32, String> {
     if sources.is_empty() {
         return Err("Нечего упаковывать".into());
@@ -2559,47 +2575,167 @@ pub fn create_archive(
             .ok_or_else(|| "Не удалось определить формат архива по имени файла".to_string())?,
     };
 
-    if let Some(session_id) = session_id {
-        return pack_remote(&session_id, &sources, &target_path, format);
-    }
-
-    let report = crate::archive::create_archive(Some(format), &sources, &target_path)
-        .map_err(String::from)?;
+    let cancelled = || task_cancelled(&token);
+    let _guard = ArchiveTokenGuard(token.clone());
+    let report = crate::archive::create_archive_cancellable(
+        Some(format),
+        &sources,
+        &target_path,
+        &cancelled,
+    )
+    .map_err(|e| {
+        if task_cancelled(&token) {
+            ARCHIVE_CANCELLED.to_string()
+        } else {
+            e.to_string()
+        }
+    })?;
     Ok(report.files)
 }
 
-/// Runs the server's archive tool over an SSH exec channel.
+/// Creates an archive **on the server**, with progress and Cancel.
 ///
-/// The command is built in `archive::remote`, where it is unit-tested; here it
-/// only needs a session and a generous timeout: packing a large tree takes
-/// minutes, and an interrupted tar leaves a broken file behind.
-fn pack_remote(
-    session_id: &str,
-    sources: &[String],
-    target_path: &str,
-    format: crate::archive::ArchiveFormat,
-) -> Result<u32, String> {
+/// Same contract as [`unpack_server_archive`]: `Running`, then `Done`
+/// (message = archive path) / `Failed` / `Cancelled`.
+pub fn pack_server_archive(
+    session_id: String,
+    sources: Vec<String>,
+    target_path: String,
+    format: Option<String>,
+    sink: StreamSink<TransferEvent>,
+) -> Result<(), String> {
+    use std::sync::atomic::AtomicBool;
+
+    if sources.is_empty() {
+        return Err("Нечего упаковывать".into());
+    }
+    let format = match format.as_deref().filter(|f| !f.trim().is_empty()) {
+        Some(value) => crate::archive::ArchiveFormat::parse(value)
+            .ok_or_else(|| format!("неизвестный формат архива: {value}"))?,
+        None => crate::archive::ArchiveFormat::from_path(&target_path)
+            .ok_or_else(|| "Не удалось определить формат архива по имени файла".to_string())?,
+    };
+    let plan = crate::archive::pack_plan(format, &sources, &target_path)
+        .map_err(String::from)?;
+
     let a = app()?;
     let session = {
         let sessions = a.sessions.lock().map_err(|_| "lock poisoned")?;
         sessions
-            .get(session_id)
+            .get(&session_id)
             .cloned()
             .ok_or_else(|| "сессия не найдена".to_string())?
     };
-    let command = crate::archive::pack_command(format, sources, target_path)
-        .map_err(String::from)?;
-    let (stdout, stderr, code) = rt()
-        .block_on(session.exec_result(&command, std::time::Duration::from_secs(3600)))
-        .map_err(|e| e.to_string())?;
-    if code != 0 {
-        return Err(format!(
-            "{}: {}",
-            format.label(),
-            crate::archive::short_error(&stdout, &stderr)
-        ));
+
+    let job_id = util::new_id("arc");
+    let suffix = job_id.trim_start_matches("arc_");
+    let pidfile = format!("/tmp/.novassh_pack_{suffix}.pid");
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    if let Ok(mut jobs) = archive_jobs().lock() {
+        jobs.insert(
+            job_id.clone(),
+            ArchiveJob {
+                cancel: cancel.clone(),
+            },
+        );
     }
-    Ok(sources.len() as u32)
+
+    let name = util::file_name(&target_path).to_string();
+    let emit = |sink: &StreamSink<TransferEvent>, state: TransferState, message: Option<String>| {
+        let _ = sink.add(TransferEvent {
+            id: job_id.clone(),
+            name: name.clone(),
+            total: 0,
+            done: 0,
+            state,
+            message,
+        });
+    };
+    emit(
+        &sink,
+        TransferState::Running,
+        Some("Упаковка на сервере…".into()),
+    );
+
+    let command = format!(
+        "mkdir -p {dir} && cd {parent} && echo $$ > {pid} && exec {tool} </dev/null",
+        dir = util::shell_escape(&util::parent(&target_path).unwrap_or_else(|| "/".into())),
+        parent = util::shell_escape(&plan.parent),
+        pid = util::shell_escape(&pidfile),
+        tool = plan.tool,
+    );
+    let result = rt().block_on(async {
+        tokio::select! {
+            result = session.exec_result(&command, std::time::Duration::from_secs(6 * 3600)) => {
+                result.map_err(|e| e.to_string())
+            }
+            _ = wait_job_cancel(&cancel) => Err(ARCHIVE_CANCELLED.to_string()),
+        }
+    });
+
+    let outcome = match result {
+        Ok((_stdout, _stderr, 0)) => {
+            // Rename first: until this succeeds there is no archive under the
+            // final name, so a cancel or a failure cannot look like success.
+            let finish = format!(
+                "mv -f {partial} {target} && rm -f {pid}",
+                partial = util::shell_escape(&plan.partial),
+                target = util::shell_escape(&target_path),
+                pid = util::shell_escape(&pidfile),
+            );
+            let (_out, err, code) = rt()
+                .block_on(session.exec_result(&finish, std::time::Duration::from_secs(120)))
+                .map_err(|e| e.to_string())?;
+            if code == 0 {
+                emit(&sink, TransferState::Done, Some(target_path.clone()));
+                Ok(())
+            } else {
+                emit(&sink, TransferState::Failed, Some(err.trim().to_string()));
+                Ok(())
+            }
+        }
+        Ok((stdout, stderr, _)) => {
+            let message = crate::archive::short_error(&stdout, &stderr);
+            let _ = rt().block_on(session.exec_result(
+                &format!(
+                    "rm -f {partial} {pid}",
+                    partial = util::shell_escape(&plan.partial),
+                    pid = util::shell_escape(&pidfile),
+                ),
+                std::time::Duration::from_secs(20),
+            ));
+            emit(&sink, TransferState::Failed, Some(message));
+            Ok(())
+        }
+        Err(error) if error == ARCHIVE_CANCELLED => {
+            let kill = format!(
+                concat!(
+                    "kill -TERM $(cat {pid} 2>/dev/null) 2>/dev/null; sleep 1; ",
+                    "kill -9 $(cat {pid} 2>/dev/null) 2>/dev/null; ",
+                    "rm -f {partial} {pid}"
+                ),
+                pid = util::shell_escape(&pidfile),
+                partial = util::shell_escape(&plan.partial),
+            );
+            let _ = rt()
+                .block_on(session.exec_result(&kill, std::time::Duration::from_secs(20)));
+            emit(
+                &sink,
+                TransferState::Cancelled,
+                Some("Упаковка отменена".into()),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            emit(&sink, TransferState::Failed, Some(error));
+            Ok(())
+        }
+    };
+
+    if let Ok(mut jobs) = archive_jobs().lock() {
+        jobs.remove(&job_id);
+    }
+    outcome
 }
 
 /// Extracts an archive **on the server** into `target_dir`.
@@ -2659,10 +2795,15 @@ pub fn copy_to_archive(
     archive_path: String,
     inner: String,
     format: Option<String>,
+    token: Option<String>,
 ) -> Result<u32, String> {
+    use std::io::Write as _;
+
     if sources.is_empty() {
         return Err("Нечего копировать".into());
     }
+    let cancelled = || task_cancelled(&token);
+    let _guard = ArchiveTokenGuard(token.clone());
     let a = app()?;
     let remote = session_id.is_some();
     let provider = provider_for(a, session_id)?;
@@ -2732,6 +2873,9 @@ pub fn copy_to_archive(
                     }
                 }
                 for file in archive.files_under("") {
+                    if cancelled() {
+                        return Err(ARCHIVE_CANCELLED.to_string());
+                    }
                     let Some(dest) = util::join_relative(&work.to_string_lossy(), &file) else {
                         continue;
                     };
@@ -2741,9 +2885,24 @@ pub fn copy_to_archive(
                     let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
                     archive
                         .with_entry(&file, |reader| {
-                            std::io::copy(reader, &mut out)
-                                .map(|_| ())
-                                .map_err(crate::error::NovaError::from)
+                            let mut buffer = vec![0u8; 256 * 1024];
+                            loop {
+                                if cancelled() {
+                                    return Err(crate::error::NovaError::Invalid(
+                                        ARCHIVE_CANCELLED.into(),
+                                    ));
+                                }
+                                let read = reader.read(&mut buffer).map_err(
+                                    crate::error::NovaError::from,
+                                )?;
+                                if read == 0 {
+                                    break;
+                                }
+                                out.write_all(&buffer[..read]).map_err(
+                                    crate::error::NovaError::from,
+                                )?;
+                            }
+                            Ok(())
                         })
                         .map_err(String::from)?;
                 }
@@ -2762,7 +2921,7 @@ pub fn copy_to_archive(
             let Some(dest) = util::join_relative(&work.to_string_lossy(), &rel) else {
                 return Err(format!("Недопустимое имя: {name}"));
             };
-            copied += copy_into_folder(&provider, source, &dest, remote)?;
+            copied += copy_into_folder(&provider, source, &dest, remote, &cancelled)?;
         }
 
         let children: Vec<String> = std::fs::read_dir(&work)
@@ -2776,13 +2935,38 @@ pub fn copy_to_archive(
 
         // 3a. Append in place when possible; 3b. otherwise rebuild.
         if appendable {
-            crate::archive::append_archive(format, &archive_path, &children)
-                .map(|_| copied)
-                .map_err(String::from)
+            let report = crate::archive::append_archive_cancellable(
+                format,
+                &archive_path,
+                &children,
+                &cancelled,
+            )
+            .map_err(|e| {
+                if cancelled() {
+                    ARCHIVE_CANCELLED.to_string()
+                } else {
+                    e.to_string()
+                }
+            })?;
+            if report.cancelled {
+                return Err(ARCHIVE_CANCELLED.to_string());
+            }
+            Ok(copied)
         } else {
-            crate::archive::create_archive(Some(format), &children, &archive_path)
-                .map(|_| copied)
-                .map_err(String::from)
+            crate::archive::create_archive_cancellable(
+                Some(format),
+                &children,
+                &archive_path,
+                &cancelled,
+            )
+            .map(|_| copied)
+            .map_err(|e| {
+                if cancelled() {
+                    ARCHIVE_CANCELLED.to_string()
+                } else {
+                    e.to_string()
+                }
+            })
         }
     })();
 
@@ -2797,7 +2981,11 @@ fn copy_into_folder(
     source: &str,
     dest: &str,
     remote: bool,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<u32, String> {
+    if cancelled() {
+        return Err(ARCHIVE_CANCELLED.to_string());
+    }
     if !remote {
         let meta = std::fs::symlink_metadata(source).map_err(|e| format!("{source}: {e}"))?;
         if meta.is_symlink() {
@@ -2816,11 +3004,12 @@ fn copy_into_folder(
                     &child.path().to_string_lossy(),
                     &util::join(dest, &name),
                     false,
+                    cancelled,
                 )?;
             }
             return Ok(copied);
         }
-        std::fs::copy(source, dest).map_err(|e| format!("{source}: {e}"))?;
+        copy_local_file(source, dest, cancelled)?;
         return Ok(1);
     }
 
@@ -2828,6 +3017,9 @@ fn copy_into_folder(
     let mut copied = 0u32;
     let mut stack = vec![(source.to_string(), dest.to_string())];
     while let Some((path, target)) = stack.pop() {
+        if cancelled() {
+            return Err(ARCHIVE_CANCELLED.to_string());
+        }
         let entry = rt()
             .block_on(provider.stat(&path))
             .map_err(|e| format!("{path}: {e}"))?;
@@ -2844,16 +3036,41 @@ fn copy_into_folder(
             }
             continue;
         }
-        download_file(provider, &path, &target)?;
+        download_file(provider, &path, &target, cancelled)?;
         copied += 1;
     }
     Ok(copied)
+}
+
+fn copy_local_file(
+    source: &str,
+    dest: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<(), String> {
+    use std::io::{Read as _, Write as _};
+    let mut input = std::fs::File::open(source).map_err(|e| format!("{source}: {e}"))?;
+    let mut output = std::fs::File::create(dest).map_err(|e| format!("{dest}: {e}"))?;
+    let mut buffer = vec![0u8; 256 * 1024];
+    loop {
+        if cancelled() {
+            return Err(ARCHIVE_CANCELLED.to_string());
+        }
+        let read = input.read(&mut buffer).map_err(|e| format!("{source}: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .map_err(|e| format!("{dest}: {e}"))?;
+    }
+    Ok(())
 }
 
 fn download_file(
     provider: &crate::fs::Provider,
     remote: &str,
     local: &str,
+    cancelled: &dyn Fn() -> bool,
 ) -> Result<(), String> {
     use std::io::Write as _;
     use tokio::io::AsyncReadExt;
@@ -2867,6 +3084,9 @@ fn download_file(
     let mut file = std::fs::File::create(local).map_err(|e| format!("{local}: {e}"))?;
     let mut chunk = vec![0u8; 256 * 1024];
     loop {
+        if cancelled() {
+            return Err(ARCHIVE_CANCELLED.to_string());
+        }
         let read = rt()
             .block_on(reader.read(&mut chunk))
             .map_err(|e| format!("{remote}: {e}"))?;
