@@ -204,9 +204,12 @@ class _ServerArchiveDialogState extends State<ServerArchiveDialog> {
 /// Small indeterminate window used while a local archive is decompressed
 /// (preview of one entry can take a while for a solid 7z).
 class ArchiveBusyDialog extends StatelessWidget {
-  const ArchiveBusyDialog({super.key, required this.label});
+  const ArchiveBusyDialog({super.key, required this.label, this.onCancel});
 
   final String label;
+
+  /// When set, a Cancel button is shown (preview can be interrupted).
+  final VoidCallback? onCancel;
 
   @override
   Widget build(BuildContext context) {
@@ -229,6 +232,15 @@ class ArchiveBusyDialog extends StatelessWidget {
           ],
         ),
       ),
+      actions: [
+        if (onCancel != null)
+          TextButton(
+            onPressed: onCancel,
+            child: const Text('Отмена'),
+          )
+        else
+          const SizedBox(height: 6),
+      ],
     );
   }
 }

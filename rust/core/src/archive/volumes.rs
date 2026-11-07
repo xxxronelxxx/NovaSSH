@@ -1,9 +1,7 @@
 //! Multi-volume archives: finding the parts of one set and joining them.
 //!
 //! Nova does not read split archives directly, but the parts are a plain byte
-//! concatenation, so the user can select them all and ask for one file. The
-//! result is a normal archive (or, for old RAR sets, a `.rar` that still needs
-//! a RAR reader).
+//! concatenation, so the user can select them all and ask for one file.
 
 use crate::error::{NovaError, Result};
 use crate::util;
@@ -67,23 +65,10 @@ pub fn detect(paths: &[String]) -> Option<VolumeSet> {
     })
 }
 
-/// `backup.7z.001` -> ("backup.7z", 1); `a.part2.rar` -> ("a.rar", 2);
-/// `a.r00` -> ("a.rar", 1); `a.z01` -> ("a.zip", 1).
+/// `backup.7z.001` -> ("backup.7z", 1); `a.z01` -> ("a.zip", 1).
 fn volume_key(name: &str) -> Option<(String, u64)> {
     if let Some((base, number)) = split_numeric(name) {
         return Some((base, number));
-    }
-    if let Some(rest) = name.strip_suffix(".rar") {
-        if let Some((base, number)) = split_part(rest) {
-            return Some((format!("{base}.rar"), number));
-        }
-        // The first volume of an old-style set is `name.rar` itself.
-        if !rest.is_empty() && !rest.ends_with(".part") {
-            return Some((format!("{rest}.rar"), 0));
-        }
-    }
-    if let Some((base, number)) = split_suffix_number(name, ".r") {
-        return Some((format!("{base}.rar"), number + 1));
     }
     if let Some((base, number)) = split_suffix_number(name, ".z") {
         return Some((format!("{base}.zip"), number));
@@ -107,16 +92,6 @@ fn split_numeric(name: &str) -> Option<(String, u64)> {
     }
     let number = digits.parse().ok()?;
     Some((name[..dot].to_string(), number))
-}
-
-/// `name.part12` -> ("name", 12).
-fn split_part(name: &str) -> Option<(String, u64)> {
-    let index = name.rfind(".part")?;
-    let digits = &name[index + 5..];
-    if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    Some((name[..index].to_string(), digits.parse().ok()?))
 }
 
 /// `name.r00` + suffix `.r` -> ("name", 0).
@@ -200,24 +175,10 @@ mod tests {
     }
 
     #[test]
-    fn old_rar_set_starts_with_the_rar_file() {
-        let set = detect(&names(&["/a/x.r01", "/a/x.rar", "/a/x.r00"])).unwrap();
-        assert_eq!(set.target_name, "x_joined.rar");
-        assert_eq!(set.parts, names(&["/a/x.rar", "/a/x.r00", "/a/x.r01"]));
-    }
-
-    #[test]
     fn split_zip_puts_the_zip_last() {
         let set = detect(&names(&["/a/x.zip", "/a/x.z02", "/a/x.z01"])).unwrap();
         assert_eq!(set.target_name, "x_joined.zip");
         assert_eq!(set.parts, names(&["/a/x.z01", "/a/x.z02", "/a/x.zip"]));
-    }
-
-    #[test]
-    fn new_style_parts_are_recognised() {
-        let set = detect(&names(&["/a/x.part2.rar", "/a/x.part1.rar"])).unwrap();
-        assert_eq!(set.target_name, "x.rar");
-        assert_eq!(set.parts, names(&["/a/x.part1.rar", "/a/x.part2.rar"]));
     }
 
     #[test]

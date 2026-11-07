@@ -187,6 +187,18 @@ impl ArchiveFs {
 
     /// Reads a whole entry into memory (capped) — used for preview and diff.
     pub fn read_entry(&self, inner: &str) -> Result<Vec<u8>> {
+        self.read_entry_cancellable(inner, MAX_INLINE_ENTRY, &|| false)
+    }
+
+    /// Same, but asks `cancelled` between chunks. A solid 7z still decodes
+    /// its block before the first chunk is handed over, so the check cannot
+    /// interrupt that format mid-block.
+    pub fn read_entry_cancellable(
+        &self,
+        inner: &str,
+        max: u64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<u8>> {
         let inner = index::normalize_path(inner);
         let size = self.index.node(&inner).map(|n| n.size).unwrap_or(0);
         if size > MAX_INLINE_ENTRY {
@@ -195,12 +207,27 @@ impl ArchiveFs {
                 MAX_INLINE_ENTRY / (1024 * 1024)
             )));
         }
+        let limit = max.min(MAX_INLINE_ENTRY);
         self.with_entry(&inner, |reader| {
-            let mut buffer = Vec::with_capacity(size.min(MAX_INLINE_ENTRY) as usize);
-            reader
-                .take(MAX_INLINE_ENTRY)
-                .read_to_end(&mut buffer)
-                .map_err(|e| NovaError::Invalid(format!("cannot read entry: {e}")))?;
+            let mut buffer = Vec::with_capacity(size.min(limit) as usize);
+            let mut chunk = vec![0u8; 64 * 1024];
+            loop {
+                if cancelled() {
+                    return Err(NovaError::Invalid("__cancelled__".into()));
+                }
+                let room = limit.saturating_sub(buffer.len() as u64);
+                if room == 0 {
+                    break;
+                }
+                let read = reader
+                    .read(&mut chunk)
+                    .map_err(|e| NovaError::Invalid(format!("cannot read entry: {e}")))?;
+                if read == 0 {
+                    break;
+                }
+                let take = (room as usize).min(read);
+                buffer.extend_from_slice(&chunk[..take]);
+            }
             Ok(buffer)
         })
     }

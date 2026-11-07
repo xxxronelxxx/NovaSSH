@@ -1838,14 +1838,49 @@ pub fn list_archive(
     archive.list(&inner, show_hidden).map_err(String::from)
 }
 
+fn preview_cancels() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static TOKENS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    TOKENS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Stops a preview that is still decompressing.
+pub fn cancel_archive_read(token: String) -> Result<(), String> {
+    if let Ok(mut tokens) = preview_cancels().lock() {
+        tokens.insert(token);
+    }
+    Ok(())
+}
+
 /// Text preview of an entry inside an archive (F3).
+///
+/// `token` makes the read cancellable: the UI passes a fresh id and calls
+/// [`cancel_archive_read`] if the preview window is closed early.
 pub fn preview_archive(
     archive_path: String,
     inner: String,
     max_bytes: u32,
+    token: Option<String>,
 ) -> Result<String, String> {
     let archive = open_archive(&archive_path)?;
-    let bytes = archive.read_entry(&inner).map_err(archive_error)?;
+    let cancelled = || {
+        token
+            .as_ref()
+            .map(|token| {
+                preview_cancels()
+                    .lock()
+                    .map(|tokens| tokens.contains(token))
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    };
+    let result = archive.read_entry_cancellable(&inner, max_bytes as u64, &cancelled);
+    if let Some(token) = &token {
+        if let Ok(mut tokens) = preview_cancels().lock() {
+            tokens.remove(token);
+        }
+    }
+    let bytes = result.map_err(archive_error)?;
     let take = bytes.len().min(max_bytes as usize);
     Ok(String::from_utf8_lossy(&bytes[..take]).to_string())
 }
@@ -3621,6 +3656,13 @@ pub fn copy_from_archive(
     };
     let _ = &label;
 
+    // The transfer bar's Cancel button works for extraction too: the id is
+    // the same one the UI sees in the first event.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if let Ok(mut map) = transfer_cancels().lock() {
+        map.insert(event_id.clone(), cancel.clone());
+    }
+
     let _ = sink.add(TransferEvent {
         id: event_id.clone(),
         name: label.clone(),
@@ -3634,9 +3676,11 @@ pub fn copy_from_archive(
     rt().spawn(async move {
         use tokio::io::AsyncWriteExt;
 
+        let _guard = CancelGuard(event_id.clone());
         let mut done = 0u64;
         let mut last_emit = 0u64;
         let mut failure: Option<String> = None;
+        let mut cancelled = false;
         let mut skipped = 0u64;
         let root_dir = util::join(&target_dir, &base_name);
 
@@ -3676,6 +3720,10 @@ pub fn copy_from_archive(
         }
 
         for file in files {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                cancelled = true;
+                break;
+            }
             let rel = file
                 .strip_prefix(&inner_norm)
                 .unwrap_or(&file)
@@ -3743,6 +3791,9 @@ pub fn copy_from_archive(
                 let write = async {
                     let mut writer = target.open_write(&dest, false).await?;
                     while let Some(chunk) = rx.recv().await {
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
                         let chunk = chunk.map_err(crate::error::NovaError::Invalid)?;
                         writer.write_all(&chunk).await?;
                         done += chunk.len() as u64;
@@ -3767,6 +3818,11 @@ pub fn copy_from_archive(
                 if let Err(e) = write {
                     entry_failed = Some(format!("{}: {e}", util::file_name(&file)));
                 }
+            }
+
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                cancelled = true;
+                break;
             }
 
             if let Some(msg) = entry_failed {
@@ -3798,12 +3854,15 @@ pub fn copy_from_archive(
             }
         }
 
-        let state = if failure.is_some() {
+        let state = if cancelled {
+            TransferState::Cancelled
+        } else if failure.is_some() {
             TransferState::Failed
         } else {
             TransferState::Done
         };
         let message = match (failure, skipped) {
+            _ if cancelled => Some("Распаковка отменена".into()),
             (None, 0) => None,
             (None, n) => Some(format!("пропущено записей с недопустимыми именами: {n}")),
             (Some(msg), 0) => Some(msg),

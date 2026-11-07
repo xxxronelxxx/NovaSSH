@@ -1263,7 +1263,11 @@ class _BrowserPageState extends State<BrowserPage> {
 
   /// Runs a local archive read behind a spinner that appears only if the
   /// operation takes longer than a blink.
-  Future<T> _withArchiveBusy<T>(String label, Future<T> Function() run) async {
+  Future<T> _withArchiveBusy<T>(
+    String label,
+    Future<T> Function() run, {
+    VoidCallback? onCancel,
+  }) async {
     var shown = false;
     final timer = Timer(const Duration(milliseconds: 350), () {
       if (!mounted) return;
@@ -1272,7 +1276,7 @@ class _BrowserPageState extends State<BrowserPage> {
         showDialog<void>(
           context: context,
           barrierDismissible: false,
-          builder: (_) => ArchiveBusyDialog(label: label),
+          builder: (_) => ArchiveBusyDialog(label: label, onCancel: onCancel),
         ),
       );
     });
@@ -1288,8 +1292,6 @@ class _BrowserPageState extends State<BrowserPage> {
 
   static final _volumePatterns = [
     RegExp(r'\.\d{3,}$'),
-    RegExp(r'\.part\d+\.rar$', caseSensitive: false),
-    RegExp(r'\.r\d{2}$', caseSensitive: false),
     RegExp(r'\.z\d{2}$', caseSensitive: false),
   ];
 
@@ -1320,11 +1322,7 @@ class _BrowserPageState extends State<BrowserPage> {
         parts: [for (final entry in items) entry.path],
         targetPath: null,
       );
-      _toast(
-        target.toLowerCase().endsWith('.rar')
-            ? 'Собрано: ${fileName(target)} · RAR не поддерживается для просмотра'
-            : 'Собрано: ${fileName(target)}',
-      );
+      _toast('Собрано: ${fileName(target)}');
       await _load(pane, pane.path);
     } catch (e) {
       _toast('Сборка: ${friendlyError(e)}', warn: true);
@@ -1445,14 +1443,17 @@ class _BrowserPageState extends State<BrowserPage> {
     final entry = pane.currentEntry;
     if (entry == null || entry.kind == EntryKind.dir) return;
     try {
+      final token = 'read_${DateTime.now().microsecondsSinceEpoch}';
       final text = pane.archivePath != null
           ? await _withArchiveBusy(
-              'Читаю файл из архива…',
+              'Читаю ${entry.name} из архива…',
               () => previewArchive(
                 archivePath: pane.archivePath!,
                 inner: entry.path,
                 maxBytes: 262144,
+                token: token,
               ),
+              onCancel: () => unawaited(cancelArchiveRead(token: token)),
             )
           : await preview(
               sessionId: pane.scope == 'remote' ? _sessionId : null,
@@ -1512,6 +1513,7 @@ class _BrowserPageState extends State<BrowserPage> {
         ),
       );
     } catch (e) {
+      if ('$e'.contains('__cancelled__')) return;
       _toast('$e', warn: true);
     }
   }
