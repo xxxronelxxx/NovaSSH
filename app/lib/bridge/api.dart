@@ -8,7 +8,7 @@ import 'model.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `app`, `apply_ai_if_fresh`, `archive_entry_dest`, `archive_folder_name`, `backup_profile`, `chrono_like_stamp`, `civil_from_days`, `device_key_supported`, `edit_cache_path`, `ftp_sessions`, `glob_match`, `hash_side`, `load_snippet_book`, `map_book`, `mark_auth_failed`, `mark_reachable`, `merge_snippets`, `now`, `open_archive`, `persist_book`, `provider_for`, `provider_remote`, `read_ref`, `remote_checksum`, `resolve_existing`, `rt`, `s3_sessions`, `secret`, `sha256_hex`, `store_snippet_book`, `transfer_cancels`, `transfer_slots`, `utc_date_iso`, `walk_files`
+// These functions are ignored because they are not marked as `pub`: `app`, `apply_ai_if_fresh`, `archive_entry_dest`, `archive_folder_name`, `backup_profile`, `chrono_like_stamp`, `civil_from_days`, `copy_into_folder`, `device_key_supported`, `download_file`, `edit_cache_path`, `ftp_sessions`, `glob_match`, `hash_side`, `load_snippet_book`, `map_book`, `mark_auth_failed`, `mark_reachable`, `merge_snippets`, `now`, `open_archive`, `pack_remote`, `persist_book`, `provider_for`, `provider_remote`, `read_ref`, `remote_checksum`, `resolve_existing`, `rt`, `s3_sessions`, `secret`, `sha256_hex`, `store_snippet_book`, `transfer_cancels`, `transfer_slots`, `utc_date_iso`, `walk_files`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `App`, `CancelGuard`, `ProfileFile`, `ProfilePayload`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -426,16 +426,66 @@ Future<String?> syncShareToken() =>
 Future<SyncReport> importSync({required String json}) =>
     NovaCore.instance.api.crateApiImportSync(json: json);
 
-/// Packs the given local files/folders into a ZIP archive.
-/// Returns the number of files written.
-Future<int> createZip({
+/// Packs the selected files/folders into an archive.
+///
+/// `session_id` = Some -> the sources live on that server and the archive is
+/// built there by its own `tar`/`zip`/`7z`; None -> local and written by the
+/// Rust core. `format` is an extension such as `zip`, `tar.gz` or `7z`; when
+/// omitted it is taken from `target_path`.
+///
+/// Returns the number of files written (remote: the number of sources, since
+/// the server does not report a count).
+Future<int> createArchive({
   String? sessionId,
   required List<String> sources,
   required String targetPath,
-}) => NovaCore.instance.api.crateApiCreateZip(
+  String? format,
+}) => NovaCore.instance.api.crateApiCreateArchive(
   sessionId: sessionId,
   sources: sources,
   targetPath: targetPath,
+  format: format,
+);
+
+/// Extracts an archive **on the server** into `target_dir`.
+///
+/// Local archives are unpacked by [`copy_from_archive`] instead: that path
+/// streams entry by entry and reports progress.
+Future<void> extractArchive({
+  String? sessionId,
+  required String archivePath,
+  required String inner,
+  required String targetDir,
+}) => NovaCore.instance.api.crateApiExtractArchive(
+  sessionId: sessionId,
+  archivePath: archivePath,
+  inner: inner,
+  targetDir: targetDir,
+);
+
+/// Copies files from a panel into a local archive ("в архив").
+///
+/// Archives are mostly append-hostile (compressed TAR and 7z cannot grow in
+/// place), so the operation is a rewrite: the archive is unpacked into a
+/// temporary folder, the new files are added there, and the archive is built
+/// again. That keeps one code path for every format and never leaves a
+/// half-written archive under the real name.
+///
+/// `session_id` = Some -> the sources are on the server and are downloaded
+/// first. `inner` is the folder inside the archive that receives them; empty
+/// means the root.
+Future<int> copyToArchive({
+  String? sessionId,
+  required List<String> sources,
+  required String archivePath,
+  required String inner,
+  String? format,
+}) => NovaCore.instance.api.crateApiCopyToArchive(
+  sessionId: sessionId,
+  sources: sources,
+  archivePath: archivePath,
+  inner: inner,
+  format: format,
 );
 
 /// Compares both trees and proposes upload/download actions per file.

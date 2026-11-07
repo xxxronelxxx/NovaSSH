@@ -253,6 +253,9 @@ pub fn init_data_dir(data_dir: Option<String>) -> Result<AppInfo, String> {
     // The older build kept edit copies in cache/edit; do not leave those behind.
     let _ = std::fs::remove_dir_all(paths.edit_cache());
     let _ = std::fs::create_dir_all(paths.edit_cache());
+    // Archive indexes survive runs: opening a large archive then becomes a
+    // header read instead of a full scan.
+    crate::archive::set_cache_dir(Some(paths.index_cache()));
     // Portable mode: pull the old %APPDATA% profile in on first launch.
     if !explicit {
         store::migrate_legacy_if_needed(&paths);
@@ -1703,20 +1706,11 @@ fn archive_entry_dest(
 
 /// `demo.zip` -> `demo`, so extracting an archive creates a named folder.
 fn archive_folder_name(path: &str) -> String {
-    let name = util::file_name(path);
-    let lower = name.to_lowercase();
-    for suffix in [".tar.gz", ".tgz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar", ".zip", ".7z"] {
-        if lower.ends_with(suffix) {
-            return name[..name.len() - suffix.len()].to_string();
-        }
-    }
-    name.to_string()
+    crate::archive::ArchiveFormat::stem(path)
 }
 
 fn open_archive(path: &str) -> Result<std::sync::Arc<crate::archive::ArchiveFs>, String> {
-    crate::archive::open(path)
-        .map(std::sync::Arc::new)
-        .map_err(|e| e.to_string())
+    crate::archive::open(path).map_err(String::from)
 }
 
 /// Lists a directory inside an archive. Local archives only for now.
@@ -2390,53 +2384,256 @@ pub fn import_sync(json: String) -> Result<SyncReport, String> {
     })
 }
 
-/// Packs the given local files/folders into a ZIP archive.
-/// Returns the number of files written.
-pub fn create_zip(
+/// Packs the selected files/folders into an archive.
+///
+/// `session_id` = Some -> the sources live on that server and the archive is
+/// built there by its own `tar`/`zip`/`7z`; None -> local and written by the
+/// Rust core. `format` is an extension such as `zip`, `tar.gz` or `7z`; when
+/// omitted it is taken from `target_path`.
+///
+/// Returns the number of files written (remote: the number of sources, since
+/// the server does not report a count).
+pub fn create_archive(
     session_id: Option<String>,
     sources: Vec<String>,
     target_path: String,
+    format: Option<String>,
 ) -> Result<u32, String> {
-    use std::io::Write as _;
-    use tokio::io::AsyncReadExt;
-
-    if session_id.is_some() {
-        return Err("Упаковка ZIP пока доступна для локальной панели".into());
-    }
     if sources.is_empty() {
         return Err("Нечего упаковывать".into());
     }
+    let format = match format.as_deref().filter(|f| !f.trim().is_empty()) {
+        Some(value) => crate::archive::ArchiveFormat::parse(value)
+            .ok_or_else(|| format!("неизвестный формат архива: {value}"))?,
+        None => crate::archive::ArchiveFormat::from_path(&target_path)
+            .ok_or_else(|| "Не удалось определить формат архива по имени файла".to_string())?,
+    };
 
-    let provider = crate::fs::Provider::local();
-    let file = std::fs::File::create(&target_path)
-        .map_err(|e| format!("{target_path}: {e}"))?;
-    let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+    if let Some(session_id) = session_id {
+        return pack_remote(&session_id, &sources, &target_path, format);
+    }
 
-    let mut queue: Vec<(String, String)> = sources
-        .into_iter()
-        .map(|path| {
-            let name = util::file_name(&path).to_string();
-            (path, name)
-        })
-        .collect();
+    let report = crate::archive::create_archive(Some(format), &sources, &target_path)
+        .map_err(String::from)?;
+    Ok(report.files)
+}
 
-    let mut written = 0u32;
-    let mut guard = 0usize;
-    while let Some((path, name_in_zip)) = queue.pop() {
-        guard += 1;
-        if guard > 200_000 {
-            break;
+/// Runs the server's archive tool over an SSH exec channel.
+///
+/// The command is built in `archive::remote`, where it is unit-tested; here it
+/// only needs a session and a generous timeout: packing a large tree takes
+/// minutes, and an interrupted tar leaves a broken file behind.
+fn pack_remote(
+    session_id: &str,
+    sources: &[String],
+    target_path: &str,
+    format: crate::archive::ArchiveFormat,
+) -> Result<u32, String> {
+    let a = app()?;
+    let session = {
+        let sessions = a.sessions.lock().map_err(|_| "lock poisoned")?;
+        sessions
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| "сессия не найдена".to_string())?
+    };
+    let command = crate::archive::pack_command(format, sources, target_path)
+        .map_err(String::from)?;
+    let (stdout, stderr, code) = rt()
+        .block_on(session.exec_result(&command, std::time::Duration::from_secs(3600)))
+        .map_err(|e| e.to_string())?;
+    if code != 0 {
+        return Err(format!(
+            "{}: {}",
+            format.label(),
+            crate::archive::short_error(&stdout, &stderr)
+        ));
+    }
+    Ok(sources.len() as u32)
+}
+
+/// Extracts an archive **on the server** into `target_dir`.
+///
+/// Local archives are unpacked by [`copy_from_archive`] instead: that path
+/// streams entry by entry and reports progress.
+pub fn extract_archive(
+    session_id: Option<String>,
+    archive_path: String,
+    inner: String,
+    target_dir: String,
+) -> Result<(), String> {
+    let Some(session_id) = session_id else {
+        return Err("локальные архивы распаковываются копированием".into());
+    };
+    let format = crate::archive::ArchiveFormat::from_path(&archive_path)
+        .ok_or_else(|| format!("формат не поддерживается: {archive_path}"))?;
+    let a = app()?;
+    let session = {
+        let sessions = a.sessions.lock().map_err(|_| "lock poisoned")?;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| "сессия не найдена".to_string())?
+    };
+    let command = crate::archive::extract_command(format, &archive_path, &inner, &target_dir)
+        .map_err(String::from)?;
+    let (stdout, stderr, code) = rt()
+        .block_on(session.exec_result(&command, std::time::Duration::from_secs(3600)))
+        .map_err(|e| e.to_string())?;
+    if code != 0 {
+        return Err(crate::archive::short_error(&stdout, &stderr));
+    }
+    Ok(())
+}
+
+/// Copies files from a panel into a local archive ("в архив").
+///
+/// Archives are mostly append-hostile (compressed TAR and 7z cannot grow in
+/// place), so the operation is a rewrite: the archive is unpacked into a
+/// temporary folder, the new files are added there, and the archive is built
+/// again. That keeps one code path for every format and never leaves a
+/// half-written archive under the real name.
+///
+/// `session_id` = Some -> the sources are on the server and are downloaded
+/// first. `inner` is the folder inside the archive that receives them; empty
+/// means the root.
+pub fn copy_to_archive(
+    session_id: Option<String>,
+    sources: Vec<String>,
+    archive_path: String,
+    inner: String,
+    format: Option<String>,
+) -> Result<u32, String> {
+    if sources.is_empty() {
+        return Err("Нечего копировать".into());
+    }
+    let a = app()?;
+    let remote = session_id.is_some();
+    let provider = provider_for(a, session_id)?;
+
+    let format = match format.as_deref().filter(|f| !f.trim().is_empty()) {
+        Some(value) => crate::archive::ArchiveFormat::parse(value)
+            .ok_or_else(|| format!("неизвестный формат архива: {value}"))?,
+        None => crate::archive::ArchiveFormat::from_path(&archive_path)
+            .ok_or_else(|| "Не удалось определить формат архива по имени файла".to_string())?,
+    };
+    if format.is_single() {
+        return Err(format!("{} не поддерживает добавление файлов", format.label()));
+    }
+
+    let stem = util::file_name(&archive_path).to_string();
+    let work = a
+        .paths
+        .tmp_dir()
+        .join(format!("add-{}", util::new_id("arc")));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+
+    let result = (|| -> Result<u32, String> {
+        // 1. Existing content, if the archive is not new.
+        if std::path::Path::new(&archive_path).exists() {
+            let archive = open_archive(&archive_path)?;
+            // Empty folders are not in `files_under`; keep them too.
+            for dir in archive.index.all_dirs() {
+                if let Some(dest) = util::join_relative(&work.to_string_lossy(), &dir) {
+                    let _ = std::fs::create_dir_all(dest);
+                }
+            }
+            for file in archive.files_under("") {
+                let Some(dest) = util::join_relative(&work.to_string_lossy(), &file) else {
+                    continue;
+                };
+                if let Some(parent) = util::parent(&dest) {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
+                archive
+                    .with_entry(&file, |reader| {
+                        std::io::copy(reader, &mut out)
+                            .map(|_| ())
+                            .map_err(crate::error::NovaError::from)
+                    })
+                    .map_err(String::from)?;
+            }
         }
-        if path == target_path {
-            continue;
+
+        // 2. New files, under `inner`.
+        let inner = inner.trim_matches('/').to_string();
+        let mut copied = 0u32;
+        for source in &sources {
+            let name = util::file_name(source).to_string();
+            let rel = if inner.is_empty() {
+                name.clone()
+            } else {
+                format!("{inner}/{name}")
+            };
+            let Some(dest) = util::join_relative(&work.to_string_lossy(), &rel) else {
+                return Err(format!("Недопустимое имя: {name}"));
+            };
+            copied += copy_into_folder(&provider, source, &dest, remote)?;
         }
+
+        // 3. Rebuild the archive from the temporary tree.
+        let children: Vec<String> = std::fs::read_dir(&work)
+            .map_err(|e| e.to_string())?
+            .flatten()
+            .map(|entry| entry.path().to_string_lossy().to_string())
+            .collect();
+        if children.is_empty() {
+            return Err("Нечего сохранять".into());
+        }
+        crate::archive::create_archive(Some(format), &children, &archive_path)
+            .map(|_| copied)
+            .map_err(String::from)
+    })();
+
+    let _ = std::fs::remove_dir_all(&work);
+    result.map_err(|e| format!("{stem}: {e}"))
+}
+
+/// Copies one file or folder into `dest`. Remote sources are downloaded
+/// through the provider; local ones are copied with the filesystem API.
+fn copy_into_folder(
+    provider: &crate::fs::Provider,
+    source: &str,
+    dest: &str,
+    remote: bool,
+) -> Result<u32, String> {
+    if !remote {
+        let meta = std::fs::symlink_metadata(source).map_err(|e| format!("{source}: {e}"))?;
+        if meta.is_symlink() {
+            return Ok(0);
+        }
+        if meta.is_dir() {
+            std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+            let mut copied = 0;
+            for child in std::fs::read_dir(source)
+                .map_err(|e| e.to_string())?
+                .flatten()
+            {
+                let name = child.file_name().to_string_lossy().to_string();
+                copied += copy_into_folder(
+                    provider,
+                    &child.path().to_string_lossy(),
+                    &util::join(dest, &name),
+                    false,
+                )?;
+            }
+            return Ok(copied);
+        }
+        std::fs::copy(source, dest).map_err(|e| format!("{source}: {e}"))?;
+        return Ok(1);
+    }
+
+    // Iterative walk: a deep server tree must not blow the stack.
+    let mut copied = 0u32;
+    let mut stack = vec![(source.to_string(), dest.to_string())];
+    while let Some((path, target)) = stack.pop() {
         let entry = rt()
             .block_on(provider.stat(&path))
             .map_err(|e| format!("{path}: {e}"))?;
         if entry.kind == EntryKind::Dir {
-            let _ = zip.add_directory(format!("{name_in_zip}/"), options);
+            std::fs::create_dir_all(&target).map_err(|e| e.to_string())?;
             let listing = rt()
                 .block_on(provider.list(&path, true))
                 .map_err(|e| format!("{path}: {e}"))?;
@@ -2444,29 +2641,43 @@ pub fn create_zip(
                 if child.name == "." || child.name == ".." {
                     continue;
                 }
-                queue.push((child.path.clone(), format!("{name_in_zip}/{}", child.name)));
+                stack.push((child.path.clone(), util::join(&target, &child.name)));
             }
-        } else {
-            zip.start_file(name_in_zip, options)
-                .map_err(|e| e.to_string())?;
-            let mut reader = rt()
-                .block_on(provider.open_read(&path, 0))
-                .map_err(|e| format!("{path}: {e}"))?;
-            let mut chunk = vec![0u8; 64 * 1024];
-            loop {
-                let read = rt()
-                    .block_on(reader.read(&mut chunk))
-                    .map_err(|e| format!("{path}: {e}"))?;
-                if read == 0 {
-                    break;
-                }
-                zip.write_all(&chunk[..read]).map_err(|e| e.to_string())?;
-            }
-            written += 1;
+            continue;
         }
+        download_file(provider, &path, &target)?;
+        copied += 1;
     }
-    zip.finish().map_err(|e| e.to_string())?;
-    Ok(written)
+    Ok(copied)
+}
+
+fn download_file(
+    provider: &crate::fs::Provider,
+    remote: &str,
+    local: &str,
+) -> Result<(), String> {
+    use std::io::Write as _;
+    use tokio::io::AsyncReadExt;
+
+    if let Some(parent) = util::parent(local) {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut reader = rt()
+        .block_on(provider.open_read(remote, 0))
+        .map_err(|e| format!("{remote}: {e}"))?;
+    let mut file = std::fs::File::create(local).map_err(|e| format!("{local}: {e}"))?;
+    let mut chunk = vec![0u8; 256 * 1024];
+    loop {
+        let read = rt()
+            .block_on(reader.read(&mut chunk))
+            .map_err(|e| format!("{remote}: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&chunk[..read]).map_err(|e| e.to_string())?;
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Collects files below `root` as `relative path -> entry`.
@@ -3062,38 +3273,69 @@ pub fn copy_from_archive(
                 let _ = target.mkdir(dir).await;
             }
 
-            let bytes = match archive.read_entry(&file) {
-                Ok(b) => b,
-                Err(e) => {
-                    failure = Some(format!("{}: {e}", util::file_name(&file)));
-                    break;
-                }
-            };
-
-            let write = async {
-                let mut writer = target.open_write(&dest, false).await?;
-                writer.write_all(&bytes).await?;
-                writer.flush().await?;
-                Ok::<(), crate::error::NovaError>(())
-            }
-            .await;
-
-            if let Err(e) = write {
-                failure = Some(format!("{}: {e}", util::file_name(&file)));
-                break;
-            }
-
-            done += bytes.len() as u64;
-            if done - last_emit >= 512 * 1024 || done == total {
-                last_emit = done;
-                let _ = sink.add(TransferEvent {
-                    id: event_id.clone(),
-                    name: label.clone(),
-                    total,
-                    done,
-                    state: TransferState::Running,
-                    message: None,
+            // Stream the entry through a bounded channel: the archive decoder
+            // is synchronous, the provider is async, and reading a 4 GB member
+            // into RAM just to write it out again is not an option.
+            let mut entry_failed: Option<String> = None;
+            {
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, String>>(4);
+                let source = archive.clone();
+                let entry_path = file.clone();
+                let producer = tokio::task::spawn_blocking(move || {
+                    let sent = source.with_entry(&entry_path, |reader| {
+                        let mut buf = vec![0u8; 256 * 1024];
+                        loop {
+                            let read = reader.read(&mut buf).map_err(|e| {
+                                crate::error::NovaError::Invalid(format!(
+                                    "cannot read {entry_path}: {e}"
+                                ))
+                            })?;
+                            if read == 0 {
+                                break;
+                            }
+                            if tx.blocking_send(Ok(buf[..read].to_vec())).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    });
+                    if let Err(e) = sent {
+                        let _ = tx.blocking_send(Err(e.to_string()));
+                    }
                 });
+
+                let write = async {
+                    let mut writer = target.open_write(&dest, false).await?;
+                    while let Some(chunk) = rx.recv().await {
+                        let chunk = chunk.map_err(crate::error::NovaError::Invalid)?;
+                        writer.write_all(&chunk).await?;
+                        done += chunk.len() as u64;
+                        if done - last_emit >= 512 * 1024 || done == total {
+                            last_emit = done;
+                            let _ = sink.add(TransferEvent {
+                                id: event_id.clone(),
+                                name: label.clone(),
+                                total,
+                                done,
+                                state: TransferState::Running,
+                                message: None,
+                            });
+                        }
+                    }
+                    writer.flush().await?;
+                    Ok::<(), crate::error::NovaError>(())
+                }
+                .await;
+                let _ = producer.await;
+
+                if let Err(e) = write {
+                    entry_failed = Some(format!("{}: {e}", util::file_name(&file)));
+                }
+            }
+
+            if let Some(msg) = entry_failed {
+                failure = Some(msg);
+                break;
             }
         }
 

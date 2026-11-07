@@ -29,9 +29,13 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 zeroize = "1.8.2"
-zip = { version = "9.1.3", default-features = false, features = ["deflate"] }
+zip = { version = "9.1.3", default-features = false, features = ["deflate", "bzip2", "zstd", "lzma"] }
 flate2 = "1.1.10"
 tar = "0.4.46"
+bzip2 = "0.6.1"
+liblzma = "0.4.8"
+zstd = "0.13.3"
+sevenz-rust2 = { version = "0.13", default-features = false, features = ["compress", "aes256"] }
 suppaftp = { version = "12.2.1", features = ["rustls-ring", "deprecated"] }
 rustls-native-certs = "0.8.5"
 similar = "2.7"

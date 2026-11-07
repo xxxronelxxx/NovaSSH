@@ -118,6 +118,20 @@ impl SshSession {
     }
 
     pub async fn exec_with_timeout(&self, command: &str, timeout: Duration) -> Result<String> {
+        self.exec_result(command, timeout)
+            .await
+            .map(|(stdout, _, _)| stdout)
+    }
+
+    /// Run a command and keep stdout, stderr and the exit code.
+    ///
+    /// Archive tools signal failures through the exit status, so callers that
+    /// must not silently succeed need the whole picture.
+    pub async fn exec_result(
+        &self,
+        command: &str,
+        timeout: Duration,
+    ) -> Result<(String, String, i32)> {
         let run = async {
             let mut channel = self.handle.channel_open_session().await?;
             channel
@@ -125,15 +139,26 @@ impl SshSession {
                 .await
                 .map_err(|e| NovaError::Ssh(e.to_string()))?;
             let mut out = Vec::new();
+            let mut err = Vec::new();
+            let mut code = -1;
             while let Some(msg) = channel.wait().await {
                 match msg {
                     ChannelMsg::Data { data } => out.extend_from_slice(&data),
+                    ChannelMsg::ExtendedData { data, ext } => {
+                        // ext 1 is stderr; anything else is worth keeping too.
+                        let _ = ext;
+                        err.extend_from_slice(&data);
+                    }
+                    ChannelMsg::ExitStatus { exit_status } => code = exit_status as i32,
                     ChannelMsg::Eof | ChannelMsg::Close => break,
-                    ChannelMsg::ExitStatus { .. } => {}
                     _ => {}
                 }
             }
-            Ok::<String, NovaError>(String::from_utf8_lossy(&out).to_string())
+            Ok::<(String, String, i32), NovaError>((
+                String::from_utf8_lossy(&out).to_string(),
+                String::from_utf8_lossy(&err).to_string(),
+                code,
+            ))
         };
 
         match tokio::time::timeout(timeout, run).await {

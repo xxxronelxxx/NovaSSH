@@ -27,6 +27,14 @@ import 'compare_page.dart';
 import 'selection_range.dart';
 import 'transfer_ui.dart';
 
+/// Result of the "create archive" dialog: name and container format.
+class _ArchiveChoice {
+  const _ArchiveChoice(this.name, this.format);
+
+  final String name;
+  final String format;
+}
+
 class _TransferMeta {
   _TransferMeta({
     required this.operation,
@@ -801,6 +809,12 @@ class _BrowserPageState extends State<BrowserPage> {
       _toast('Ничего не выбрано');
       return;
     }
+    // The opposite pane may be inside an archive: F5 then adds to it instead
+    // of uploading/downloading.
+    if (target.archivePath != null) {
+      await _copyIntoArchive(source, target);
+      return;
+    }
     final direction = _active == 'local' ? 'upload' : 'download';
 
     // Overwriting a file on the other side is the dangerous part of F5.
@@ -1073,18 +1087,54 @@ class _BrowserPageState extends State<BrowserPage> {
         _toast('Выберите архив для распаковки');
         return;
       }
-      if (source.scope != 'local') {
-        _toast('Архивы на сервере — в следующей итерации');
-        return;
-      }
       archivePath = entry.path;
       inner = '/';
+    }
+
+    if (target.archivePath != null) {
+      _toast('Архив распаковывается в папку, а не в другой архив', warn: true);
+      return;
+    }
+
+    // Unpacking on the server keeps the archive where it is: no upload of a
+    // multi-gigabyte file just to get its contents.
+    if (source.scope == 'remote' && target.scope == 'remote') {
+      try {
+        _toast('Распаковка на сервере…');
+        await extractArchive(
+          sessionId: _sessionId,
+          archivePath: archivePath,
+          inner: inner == '/' ? '' : inner,
+          targetDir: target.path,
+        );
+        _toast('Распаковано в ${target.path}');
+        await _load(target, target.path);
+      } catch (e) {
+        _toast('Распаковка: ${friendlyError(e)}', warn: true);
+      }
+      return;
+    }
+
+    // Remote archive into the local pane: download it once into tmp, then
+    // unpack locally. The temporary copy disappears with the server tab.
+    var localArchive = archivePath;
+    if (source.scope == 'remote') {
+      try {
+        localArchive = await downloadToCache(
+          sessionId: _sessionId,
+          serverName: _serverNameFor(source),
+          remotePath: archivePath,
+        );
+      } catch (e) {
+        _toast('Не удалось скачать архив: ${friendlyError(e)}', warn: true);
+        return;
+      }
     }
 
     _track(
       (_) => copyFromArchive(
         sessionId: target.scope == 'remote' ? _sessionId : null,
-        archivePath: archivePath,
+        archivePath: localArchive,
         inner: inner,
         targetDir: target.path,
       ),
@@ -2828,58 +2878,178 @@ class _BrowserPageState extends State<BrowserPage> {
     }
   }
 
-  /// Packs the selection (local pane) into a ZIP next to it.
-  Future<void> _createZip(Pane pane) async {
+  /// Archive formats offered in the pack dialog, in menu order.
+  static const _archiveFormats = <String, String>{
+    'zip': 'ZIP (.zip)',
+    'tar.gz': 'TAR.GZ (.tar.gz)',
+    'tar.bz2': 'TAR.BZ2 (.tar.bz2)',
+    'tar.xz': 'TAR.XZ (.tar.xz)',
+    'tar.zst': 'TAR.ZST (.tar.zst)',
+    '7z': '7Z (.7z)',
+    'tar': 'TAR (.tar)',
+  };
+
+  /// Single-file compressors: one input file only.
+  static const _singleFormats = <String, String>{
+    'gz': 'GZ (.gz)',
+    'bz2': 'BZ2 (.bz2)',
+    'xz': 'XZ (.xz)',
+    'zst': 'ZST (.zst)',
+  };
+
+  static String _replaceArchiveExt(String name, String format) {
+    final lower = name.toLowerCase();
+    for (final ext in const [
+      '.tar.gz',
+      '.tar.bz2',
+      '.tar.xz',
+      '.tar.zst',
+      '.tar.zstd',
+      '.tgz',
+      '.tbz2',
+      '.txz',
+      '.tzst',
+      '.zip',
+      '.tar',
+      '.7z',
+      '.gz',
+      '.bz2',
+      '.xz',
+      '.zst',
+    ]) {
+      if (lower.endsWith(ext)) return '${name.substring(0, name.length - ext.length)}.$format';
+    }
+    return '$name.$format';
+  }
+
+  /// Packs the selection into an archive next to it (local) or on the server.
+  Future<void> _createArchive(Pane pane) async {
     final items = pane.targets;
     if (items.isEmpty) {
       _toast('Ничего не выбрано', warn: true);
       return;
     }
     final base = items.length == 1 ? items.first.name : fileName(pane.path);
+    final formats = <String, String>{
+      ..._archiveFormats,
+      if (items.length == 1 && items.first.kind != EntryKind.dir)
+        ..._singleFormats,
+    };
     final nameCtrl = TextEditingController(text: '$base.zip');
-    final name = await showDialog<String>(
+    var format = 'zip';
+
+    final choice = await showDialog<_ArchiveChoice>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: T.menu,
-        title: const Text('Упаковать в ZIP', style: TextStyle(fontSize: 14)),
-        content: SizedBox(
-          width: _dialogWidth(420),
-          child: TextField(
-            controller: nameCtrl,
-            autofocus: true,
-            style: const TextStyle(fontSize: 12.5),
-            decoration: const InputDecoration(labelText: 'Имя архива'),
-            onSubmitted: (v) => Navigator.pop(ctx, v),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Отмена'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(
-              ctx,
-              nameCtrl.text.trim().isEmpty ? null : nameCtrl.text.trim(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          backgroundColor: T.menu,
+          title: const Text('Создать архив', style: TextStyle(fontSize: 14)),
+          content: SizedBox(
+            width: _dialogWidth(420),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  autofocus: true,
+                  style: const TextStyle(fontSize: 12.5),
+                  decoration: const InputDecoration(labelText: 'Имя архива'),
+                  onSubmitted: (v) => Navigator.pop(
+                    ctx,
+                    _ArchiveChoice(v.trim(), format),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: format,
+                  dropdownColor: T.menu,
+                  style: const TextStyle(fontSize: 12.5),
+                  decoration: const InputDecoration(labelText: 'Формат'),
+                  items: [
+                    for (final entry in formats.entries)
+                      DropdownMenuItem(
+                        value: entry.key,
+                        child: Text(entry.value),
+                      ),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setLocal(() {
+                      format = value;
+                      nameCtrl.text = _replaceArchiveExt(nameCtrl.text, value);
+                    });
+                  },
+                ),
+              ],
             ),
-            child: const Text('Создать'),
           ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Отмена'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                ctx,
+                _ArchiveChoice(nameCtrl.text.trim(), format),
+              ),
+              child: const Text('Создать'),
+            ),
+          ],
+        ),
       ),
     );
     nameCtrl.dispose();
-    if (name == null) return;
+    if (choice == null || choice.name.isEmpty) return;
 
+    final remote = pane.scope == 'remote';
+    final targetPath = joinPath(pane.path, choice.name);
     try {
-      final count = await createZip(
-        sessionId: null,
+      final count = await createArchive(
+        sessionId: remote ? _tabOf(pane).connection.sessionId : null,
         sources: [for (final entry in items) entry.path],
-        targetPath: joinPath(pane.path, name),
+        targetPath: targetPath,
+        format: choice.format,
       );
-      _toast('Создан архив $name · файлов: $count');
+      _toast(remote
+          ? 'Архив ${choice.name} создан на сервере · объектов: $count'
+          : 'Создан архив ${choice.name} · файлов: $count');
       await _load(pane, pane.path);
     } catch (e) {
-      _toast('ZIP: ${friendlyError(e)}', warn: true);
+      _toast('Архив: ${friendlyError(e)}', warn: true);
+    }
+  }
+
+  /// F5 into a pane that browses an archive: the archive is rewritten with the
+  /// new files inside (compressed TAR and 7z cannot grow in place).
+  Future<void> _copyIntoArchive(Pane source, Pane target) async {
+    final items = source.targets;
+    if (items.isEmpty) {
+      _toast('Ничего не выбрано');
+      return;
+    }
+    if (source.archivePath != null) {
+      _toast('Копирование из архива в архив пока не поддерживается', warn: true);
+      return;
+    }
+    if (target.scope != 'local') {
+      _toast('Архив должен быть на компьютере', warn: true);
+      return;
+    }
+    final inner = target.path == '/' ? '' : target.path.trim();
+    _toast('Добавляю в ${fileName(target.archivePath!)}…');
+    try {
+      final count = await copyToArchive(
+        sessionId: source.scope == 'remote' ? _sessionId : null,
+        sources: [for (final entry in items) entry.path],
+        archivePath: target.archivePath!,
+        inner: inner,
+        format: null,
+      );
+      _toast('Добавлено в архив · файлов: $count');
+      await _load(target, target.path);
+    } catch (e) {
+      _toast('В архив: ${friendlyError(e)}', warn: true);
     }
   }
 
@@ -3666,11 +3836,12 @@ class _BrowserPageState extends State<BrowserPage> {
             style: TextStyle(fontSize: 12.5),
           ),
         ),
-        if (local) ...[
+        if (pane.archivePath == null)
           const PopupMenuItem(
             value: 'zip',
-            child: Text('Упаковать в ZIP…', style: TextStyle(fontSize: 12.5)),
+            child: Text('Создать архив…', style: TextStyle(fontSize: 12.5)),
           ),
+        if (local) ...[
           const PopupMenuItem(
             value: 'explorer',
             child: Text(
@@ -3715,7 +3886,7 @@ class _BrowserPageState extends State<BrowserPage> {
       case 'sha256_pair':
         await _checksumDialog(pane, entry, compareWithOther: true);
       case 'zip':
-        await _createZip(pane);
+        await _createArchive(pane);
       case 'find':
         await _findFiles();
       case 'chmod':
@@ -3813,7 +3984,9 @@ class _BrowserPageState extends State<BrowserPage> {
     }
     if (_isArchive(entry.name) && pane.archivePath == null) {
       if (pane.scope != 'local') {
-        _toast('Архивы на сервере — в следующей итерации');
+        _toast(
+          'Архив на сервере: распакуйте его (Ctrl+F5) или скачайте на компьютер',
+        );
         return;
       }
       setState(() => pane.archivePath = entry.path);
@@ -3824,16 +3997,29 @@ class _BrowserPageState extends State<BrowserPage> {
     await _edit();
   }
 
+  static const _archiveSuffixes = [
+    '.tar.gz',
+    '.tar.bz2',
+    '.tar.xz',
+    '.tar.zst',
+    '.tar.zstd',
+    '.tgz',
+    '.tbz2',
+    '.tbz',
+    '.txz',
+    '.tzst',
+    '.zip',
+    '.tar',
+    '.7z',
+    '.gz',
+    '.bz2',
+    '.xz',
+    '.zst',
+  ];
+
   bool _isArchive(String name) {
     final lower = name.toLowerCase();
-    return lower.endsWith('.zip') ||
-        lower.endsWith('.tar') ||
-        lower.endsWith('.tar.gz') ||
-        lower.endsWith('.tgz') ||
-        lower.endsWith('.tar.bz2') ||
-        lower.endsWith('.tar.xz') ||
-        lower.endsWith('.tar.zst') ||
-        lower.endsWith('.7z');
+    return _archiveSuffixes.any(lower.endsWith);
   }
 
   // -------------------------------------------------------------------------
@@ -3948,6 +4134,23 @@ class _BrowserPageState extends State<BrowserPage> {
       return;
     }
     final owner = _tabOf(pane);
+    // Dropping onto a pane that browses an archive adds to that archive.
+    if (pane.archivePath != null) {
+      try {
+        final count = await copyToArchive(
+          sessionId: null,
+          sources: files,
+          archivePath: pane.archivePath!,
+          inner: pane.path == '/' ? '' : pane.path,
+          format: null,
+        );
+        _toast('Добавлено в архив · файлов: $count');
+        await _load(pane, pane.path);
+      } catch (e) {
+        _toast('В архив: ${friendlyError(e)}', warn: true);
+      }
+      return;
+    }
     if (pane.scope == 'local') {
       final allowed = await _resolveLocalConflicts(pane, files);
       if (allowed == null) return;

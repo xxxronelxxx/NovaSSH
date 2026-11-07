@@ -1,154 +1,72 @@
-//! Read-only archive browsing (ZIP for now).
+//! Archive browsing: ZIP, TAR (+ gz/bz2/xz/zst), 7z and single-file
+//! compressors.
 //!
 //! An archive is presented as a virtual directory tree: `list` returns the
-//! children of a virtual path, `open_read` streams one entry. The index is built
-//! from the ZIP central directory, so opening a large archive is instant.
+//! children of a virtual path, `with_entry` streams one entry. The index is
+//! built once from the archive header (ZIP central directory, TAR headers, 7z
+//! header) and cached on disk, so reopening a 50 GB archive is instant.
 
-use std::collections::HashMap;
-use std::io::{Cursor, Read};
-use std::sync::Arc;
+mod create;
+mod format;
+mod index;
+mod remote;
+mod sevenz_backend;
+mod single_backend;
+mod tar_backend;
+mod zip_backend;
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::io::Read;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use serde::{Deserialize, Serialize};
+
+pub use create::{create_archive, CreateReport};
+pub use format::ArchiveFormat;
+pub use index::{ArchiveIndex, ArchiveNode, RawEntry};
+pub use remote::{extract_command, pack_command, short_error};
 
 use crate::error::{NovaError, Result};
-use crate::model::{DirListing, Entry, EntryKind};
+use crate::model::{DirListing, Entry};
 use crate::util;
 
-/// Cap for in-memory extraction of a single entry.
+/// Cap for in-memory reads (preview, diff). Copies stream instead.
 const MAX_INLINE_ENTRY: u64 = 64 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
-pub struct ArchiveNode {
-    pub name: String,
-    pub is_dir: bool,
-    pub size: u64,
-    pub modified_ms: Option<i64>,
-}
-
-pub struct ArchiveIndex {
-    /// Virtual path ("" is the archive root) -> child names.
-    children: HashMap<String, Vec<String>>,
-    /// Virtual path -> node metadata.
-    nodes: HashMap<String, ArchiveNode>,
-    /// Virtual file path -> index in the central directory.
-    entry_index: HashMap<String, usize>,
-}
+/// Bump when the cached layout changes; old index files are then ignored.
+const CACHE_VERSION: u32 = 1;
 
 pub struct ArchiveFs {
     /// Path of the archive itself (local file).
     pub archive_path: String,
+    pub format: ArchiveFormat,
     pub index: Arc<ArchiveIndex>,
 }
 
-fn normalize(name: &str) -> String {
-    name.replace('\\', "/").trim_matches('/').to_string()
-}
-
-fn parent_of(path: &str) -> String {
-    match path.rfind('/') {
-        Some(i) => path[..i].to_string(),
-        None => String::new(),
-    }
-}
-
-fn join_virtual(base: &str, name: &str) -> String {
-    if base.is_empty() {
-        name.to_string()
-    } else {
-        format!("{base}/{name}")
-    }
-}
-
 impl ArchiveFs {
+    /// Opens and scans an archive without touching the disk cache.
     pub fn open(path: &str) -> Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let mut zip = zip::ZipArchive::new(file)
-            .map_err(|e| NovaError::Invalid(format!("cannot read archive: {e}")))?;
+        let format = detect_format(path)?;
+        let entries = scan(path, format)?;
+        Ok(Self::from_entries(path, format, entries))
+    }
 
-        let mut nodes: HashMap<String, ArchiveNode> = HashMap::new();
-        let mut entry_index: HashMap<String, usize> = HashMap::new();
-
-        // Explicit directory entries are optional in ZIP; parents are synthesised.
-        let mut ensure_dir = |nodes: &mut HashMap<String, ArchiveNode>, dir: &str| {
-            if dir.is_empty() {
-                return;
-            }
-            nodes
-                .entry(dir.to_string())
-                .or_insert_with(|| ArchiveNode {
-                    name: dir.rsplit('/').next().unwrap_or(dir).to_string(),
-                    is_dir: true,
-                    size: 0,
-                    modified_ms: None,
-                });
-        };
-
-        for i in 0..zip.len() {
-            let file = zip
-                .by_index(i)
-                .map_err(|e| NovaError::Invalid(format!("bad entry {i}: {e}")))?;
-            let raw = file
-                .name()
-                .map_err(|e| NovaError::Invalid(format!("bad entry name: {e}")))?
-                .to_string();
-            let path = normalize(&raw);
-            if path.is_empty() {
-                continue;
-            }
-            let is_dir = file.is_dir() || raw.ends_with('/');
-            let size = if is_dir { 0 } else { file.size() };
-            let modified_ms = file.last_modified().and_then(datetime_to_ms);
-
-            let mut parent = parent_of(&path);
-            while !parent.is_empty() {
-                ensure_dir(&mut nodes, &parent);
-                parent = parent_of(&parent);
-            }
-
-            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
-            nodes.insert(
-                path.clone(),
-                ArchiveNode {
-                    name,
-                    is_dir,
-                    size,
-                    modified_ms,
-                },
-            );
-            if !is_dir {
-                entry_index.insert(path, i);
-            }
-        }
-
-        let mut children: HashMap<String, Vec<String>> = HashMap::new();
-        for (path, node) in &nodes {
-            let parent = parent_of(path);
-            let child_path = if parent.is_empty() {
-                path.clone()
-            } else {
-                format!("{}/{}", parent, node.name)
-            };
-            children.entry(parent).or_default().push(child_path);
-        }
-        for list in children.values_mut() {
-            list.sort();
-        }
-
-        Ok(Self {
+    fn from_entries(path: &str, format: ArchiveFormat, entries: Vec<RawEntry>) -> Self {
+        Self {
             archive_path: path.to_string(),
-            index: Arc::new(ArchiveIndex {
-                children,
-                nodes,
-                entry_index,
-            }),
-        })
+            format,
+            index: Arc::new(ArchiveIndex::build(entries)),
+        }
     }
 
     pub fn list(&self, inner: &str, show_hidden: bool) -> Result<DirListing> {
-        let inner = normalize(inner);
+        let inner = index::normalize_path(inner);
         if !inner.is_empty() {
             let node = self
                 .index
-                .nodes
-                .get(&inner)
+                .node(&inner)
                 .ok_or_else(|| NovaError::NotFound(format!("{inner} in archive")))?;
             if !node.is_dir {
                 return Err(NovaError::Invalid(format!("not a directory: {inner}")));
@@ -156,28 +74,12 @@ impl ArchiveFs {
         }
 
         let mut entries = Vec::new();
-        for child in self.index.children.get(&inner).cloned().unwrap_or_default() {
-            if let Some(node) = self.index.nodes.get(&child) {
-                let hidden = util::is_probably_hidden(&node.name);
-                if hidden && !show_hidden {
+        for child in self.index.children_of(&inner) {
+            if let Some(entry) = self.index.entry(&child) {
+                if entry.hidden && !show_hidden {
                     continue;
                 }
-                entries.push(Entry {
-                    name: node.name.clone(),
-                    path: child.clone(),
-                    kind: if node.is_dir {
-                        EntryKind::Dir
-                    } else {
-                        EntryKind::File
-                    },
-                    size: node.size,
-                    modified: node.modified_ms,
-                    mode: None,
-                    uid: None,
-                    gid: None,
-                    hidden,
-                    link_target: None,
-                });
+                entries.push(entry);
             }
         }
 
@@ -190,10 +92,11 @@ impl ArchiveFs {
             parent: if inner.is_empty() {
                 None
             } else {
-                Some(if parent_of(&inner).is_empty() {
+                let parent = index::parent_path(&inner);
+                Some(if parent.is_empty() {
                     "/".to_string()
                 } else {
-                    format!("/{}", parent_of(&inner))
+                    format!("/{parent}")
                 })
             },
             entries,
@@ -203,62 +106,63 @@ impl ArchiveFs {
     }
 
     pub fn stat(&self, inner: &str) -> Result<Entry> {
-        let inner = normalize(inner);
-        let node = self
-            .index
-            .nodes
-            .get(&inner)
-            .ok_or_else(|| NovaError::NotFound(inner.clone()))?;
-        Ok(Entry {
-            name: node.name.clone(),
-            path: inner.clone(),
-            kind: if node.is_dir {
-                EntryKind::Dir
-            } else {
-                EntryKind::File
-            },
-            size: node.size,
-            modified: node.modified_ms,
-            mode: None,
-            uid: None,
-            gid: None,
-            hidden: util::is_probably_hidden(&node.name),
-            link_target: None,
-        })
+        let inner = index::normalize_path(inner);
+        self.index
+            .entry(&inner)
+            .ok_or_else(|| NovaError::NotFound(inner.clone()))
     }
 
-    /// Reads a whole entry into memory (capped) — used for preview and copies.
-    pub fn read_entry(&self, inner: &str) -> Result<Vec<u8>> {
-        let inner = normalize(inner);
-        let index = *self
+    /// Streams one entry through `read`. Callers that copy large files must
+    /// use this instead of [`Self::read_entry`], which is capped.
+    pub fn with_entry<T>(
+        &self,
+        inner: &str,
+        read: impl FnOnce(&mut dyn Read) -> Result<T>,
+    ) -> Result<T> {
+        let inner = index::normalize_path(inner);
+        let raw = self
             .index
-            .entry_index
-            .get(&inner)
+            .raw(&inner)
             .ok_or_else(|| NovaError::NotFound(inner.clone()))?;
+        match raw.locator {
+            index::Locator::Zip(_) => {
+                zip_backend::with_entry(&self.archive_path, raw.locator, read)
+            }
+            index::Locator::TarOffset { .. } | index::Locator::Ordinal(_) => {
+                tar_backend::with_entry(&self.archive_path, self.format, raw.locator, read)
+            }
+            index::Locator::SevenZ => {
+                sevenz_backend::with_entry(&self.archive_path, &raw.path, read)
+            }
+            index::Locator::Single => {
+                let mut reader = single_backend::open_reader(&self.archive_path, self.format)?;
+                read(&mut reader)
+            }
+        }
+    }
 
-        let size = self.index.nodes.get(&inner).map(|n| n.size).unwrap_or(0);
+    /// Reads a whole entry into memory (capped) — used for preview and diff.
+    pub fn read_entry(&self, inner: &str) -> Result<Vec<u8>> {
+        let inner = index::normalize_path(inner);
+        let size = self.index.node(&inner).map(|n| n.size).unwrap_or(0);
         if size > MAX_INLINE_ENTRY {
             return Err(NovaError::Unsupported(format!(
                 "entry is larger than {} MB",
                 MAX_INLINE_ENTRY / (1024 * 1024)
             )));
         }
-
-        let file = std::fs::File::open(&self.archive_path)?;
-        let mut zip = zip::ZipArchive::new(file)
-            .map_err(|e| NovaError::Invalid(format!("cannot read archive: {e}")))?;
-        let mut entry = zip
-            .by_index(index)
-            .map_err(|e| NovaError::Invalid(format!("bad entry: {e}")))?;
-        let mut buffer = Vec::with_capacity(size as usize);
-        entry
-            .read_to_end(&mut buffer)
-            .map_err(|e| NovaError::Invalid(format!("cannot read entry: {e}")))?;
-        Ok(buffer)
+        self.with_entry(&inner, |reader| {
+            let mut buffer = Vec::with_capacity(size.min(MAX_INLINE_ENTRY) as usize);
+            reader
+                .take(MAX_INLINE_ENTRY)
+                .read_to_end(&mut buffer)
+                .map_err(|e| NovaError::Invalid(format!("cannot read entry: {e}")))?;
+            Ok(buffer)
+        })
     }
 
-    pub fn read_cursor(&self, inner: &str) -> Result<Cursor<Vec<u8>>> {
-        Ok(Cursor::new(self.read_entry(inner)?))
+    pub fn read_cursor(&self, inner: &str) -> Result<std::io::Cursor<Vec<u8>>> {
+        Ok(std::io::Cursor::new(self.read_entry(inner)?))
     }
 
     /// Entry bytes for `Provider::open_read`, which needs the raw buffer to
@@ -267,73 +171,233 @@ impl ArchiveFs {
         self.read_entry(inner)
     }
 
-    /// All file paths under `inner` (recursively), excluding directories.
     pub fn files_under(&self, inner: &str) -> Vec<String> {
-        let inner = normalize(inner);
-        if let Some(node) = self.index.nodes.get(&inner) {
-            if !node.is_dir {
-                return vec![inner];
-            }
-        }
-        let mut out = Vec::new();
-        let mut stack = vec![inner];
-        while let Some(dir) = stack.pop() {
-            for child in self.index.children.get(&dir).cloned().unwrap_or_default() {
-                if let Some(node) = self.index.nodes.get(&child) {
-                    if node.is_dir {
-                        stack.push(child);
-                    } else {
-                        out.push(child);
-                    }
-                }
-            }
-        }
-        out.sort();
-        out
+        self.index.files_under(inner)
+    }
+
+    pub fn entry_size(&self, inner: &str) -> u64 {
+        self.index.node(inner).map(|n| n.size).unwrap_or(0)
     }
 }
 
-fn datetime_to_ms(dt: zip::DateTime) -> Option<i64> {
-    // zip exposes components without a timezone; treat it as UTC for stability.
-    let year = dt.year();
-    let month = dt.month();
-    let day = dt.day();
-    let hour = dt.hour();
-    let minute = dt.minute();
-    let second = dt.second();
-    if !(1970..=3000).contains(&year) {
+fn detect_format(path: &str) -> Result<ArchiveFormat> {
+    format::detect(path).ok_or_else(|| {
+        NovaError::Unsupported(format!(
+            "archive type is not supported: {}",
+            util::file_name(path)
+        ))
+    })
+}
+
+fn scan(path: &str, format: ArchiveFormat) -> Result<Vec<RawEntry>> {
+    match format {
+        ArchiveFormat::Zip => zip_backend::scan(path),
+        ArchiveFormat::SevenZ => sevenz_backend::scan(path),
+        f if f.is_tar() => tar_backend::scan(path, f),
+        f if f.is_single() => single_backend::scan(path, f),
+        other => Err(NovaError::Unsupported(format!(
+            "{} is not supported",
+            other.label()
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Opening with the index cache
+// ---------------------------------------------------------------------------
+
+/// Public entry point used by the API layer: returns a shared, cached handle.
+pub fn open(path: &str) -> Result<Arc<ArchiveFs>> {
+    let format = detect_format(path)?;
+    let meta = std::fs::metadata(path)
+        .map_err(|e| NovaError::Invalid(format!("{}: {e}", util::file_name(path))))?;
+    let size = meta.len();
+    let modified_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let key = cache_key(path, size, modified_ms, format);
+
+    if let Some(hit) = memory_get(&key) {
+        return Ok(hit);
+    }
+
+    let entries = match disk_load(&key, path, size, modified_ms, format) {
+        Some(entries) => entries,
+        None => {
+            let entries = scan(path, format)?;
+            disk_store(
+                &key,
+                &CachedIndex {
+                    version: CACHE_VERSION,
+                    path: path.to_string(),
+                    size,
+                    modified_ms,
+                    format,
+                    entries: entries.clone(),
+                },
+            );
+            entries
+        }
+    };
+
+    let fs = Arc::new(ArchiveFs::from_entries(path, format, entries));
+    memory_put(key, fs.clone());
+    Ok(fs)
+}
+
+pub fn is_supported(path: &str) -> bool {
+    format::detect(path).is_some()
+}
+
+fn cache_key(path: &str, size: u64, modified_ms: i64, format: ArchiveFormat) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    size.hash(&mut hasher);
+    modified_ms.hash(&mut hasher);
+    (format as u8).hash(&mut hasher);
+    CACHE_VERSION.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+#[derive(Serialize, Deserialize)]
+struct CachedIndex {
+    version: u32,
+    path: String,
+    size: u64,
+    modified_ms: i64,
+    format: ArchiveFormat,
+    entries: Vec<RawEntry>,
+}
+
+fn cache_dir_slot() -> &'static Mutex<Option<PathBuf>> {
+    static DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    DIR.get_or_init(|| Mutex::new(None))
+}
+
+/// Called once from `init_data_dir`. `None` (or an unusable folder) disables
+/// the disk cache; browsing still works, it just re-scans.
+pub fn set_cache_dir(dir: Option<PathBuf>) {
+    if let Some(dir) = dir.as_ref() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut slot) = cache_dir_slot().lock() {
+        *slot = dir;
+    }
+}
+
+fn cache_path(key: &str) -> Option<PathBuf> {
+    let slot = cache_dir_slot().lock().ok()?;
+    slot.as_ref().map(|dir| dir.join(format!("{key}.idx")))
+}
+
+fn disk_load(
+    key: &str,
+    path: &str,
+    size: u64,
+    modified_ms: i64,
+    format: ArchiveFormat,
+) -> Option<Vec<RawEntry>> {
+    let file = cache_path(key)?;
+    disk_load_file(&file, path, size, modified_ms, format)
+}
+
+fn disk_load_file(
+    file: &std::path::Path,
+    path: &str,
+    size: u64,
+    modified_ms: i64,
+    format: ArchiveFormat,
+) -> Option<Vec<RawEntry>> {
+    let bytes = std::fs::read(file).ok()?;
+    let raw = zstd::decode_all(bytes.as_slice()).ok()?;
+    let cached: CachedIndex = serde_json::from_slice(&raw).ok()?;
+    if cached.version != CACHE_VERSION
+        || cached.path != path
+        || cached.size != size
+        || cached.modified_ms != modified_ms
+        || cached.format != format
+    {
+        let _ = std::fs::remove_file(file);
         return None;
     }
-    let days = days_from_civil(year as i64, month as u32, day as u32);
-    let ms = ((days * 86_400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64) * 1000).max(0);
-    Some(ms)
+    Some(cached.entries)
 }
 
-/// Howard Hinnant's days-from-civil algorithm.
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (m as i64 + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+fn disk_store(key: &str, cached: &CachedIndex) {
+    let Some(file) = cache_path(key) else {
+        return;
+    };
+    disk_store_file(&file, cached);
+    prune_cache(&file);
 }
 
-/// Detects archive type by extension; only ZIP is supported so far.
-pub fn is_supported(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    lower.ends_with(".zip")
-}
-
-pub fn open(path: &str) -> Result<ArchiveFs> {
-    if !is_supported(path) {
-        return Err(NovaError::Unsupported(format!(
-            "archive type is not supported yet: {}",
-            util::file_name(path)
-        )));
+fn disk_store_file(file: &std::path::Path, cached: &CachedIndex) {
+    let Ok(json) = serde_json::to_vec(cached) else {
+        return;
+    };
+    let Ok(packed) = zstd::encode_all(json.as_slice(), 3) else {
+        return;
+    };
+    let tmp = file.with_extension("tmp");
+    if std::fs::write(&tmp, packed).is_ok() {
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::rename(&tmp, file);
     }
-    ArchiveFs::open(path)
+}
+
+/// Keeps the folder bounded: archives come and go, their indexes would stay.
+fn prune_cache(current: &std::path::Path) {
+    let Some(dir) = current.parent() else {
+        return;
+    };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = read
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("idx") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect();
+    const MAX_INDEXES: usize = 200;
+    if files.len() <= MAX_INDEXES {
+        return;
+    }
+    files.sort_by_key(|(modified, _)| *modified);
+    for (_, path) in files.iter().take(files.len() - MAX_INDEXES) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn memory_slot() -> &'static Mutex<Vec<(String, Arc<ArchiveFs>)>> {
+    static MEM: OnceLock<Mutex<Vec<(String, Arc<ArchiveFs>)>>> = OnceLock::new();
+    MEM.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn memory_get(key: &str) -> Option<Arc<ArchiveFs>> {
+    let mut cache = memory_slot().lock().ok()?;
+    let position = cache.iter().position(|(k, _)| k == key)?;
+    let hit = cache.remove(position);
+    let fs = hit.1.clone();
+    cache.insert(0, hit);
+    Some(fs)
+}
+
+fn memory_put(key: String, fs: Arc<ArchiveFs>) {
+    let Ok(mut cache) = memory_slot().lock() else {
+        return;
+    };
+    cache.retain(|(k, _)| k != &key);
+    cache.insert(0, (key, fs));
+    cache.truncate(8);
 }
 
 #[cfg(test)]
@@ -354,6 +418,63 @@ mod tests {
         zip.start_file("docs/nested/deep.txt", options).unwrap();
         zip.write_all(b"deep").unwrap();
         zip.finish().unwrap();
+    }
+
+    fn make_tree(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("docs/nested")).unwrap();
+        std::fs::write(dir.join("docs/readme.txt"), b"hello archive").unwrap();
+        std::fs::write(dir.join("docs/nested/deep.txt"), b"deep").unwrap();
+        std::fs::write(dir.join("index.php"), b"<?php echo 1;").unwrap();
+    }
+
+    fn make_tar(path: &std::path::Path, dir: &std::path::Path, format: ArchiveFormat) {
+        // Build the tar in memory, then wrap it: an encoder that is simply
+        // dropped (zstd) would otherwise leave a truncated frame behind.
+        let mut builder = tar::Builder::new(Vec::new());
+        builder.append_dir_all("docs", dir.join("docs")).unwrap();
+        builder
+            .append_path_with_name(dir.join("index.php"), "index.php")
+            .unwrap();
+        let bytes = builder.into_inner().unwrap();
+
+        let write = |path: &std::path::Path, bytes: &[u8]| {
+            std::fs::write(path, bytes).unwrap();
+        };
+        match format {
+            ArchiveFormat::Tar => write(path, &bytes),
+            ArchiveFormat::TarGz => {
+                let mut e = flate2::write::GzEncoder::new(
+                    std::fs::File::create(path).unwrap(),
+                    flate2::Compression::fast(),
+                );
+                e.write_all(&bytes).unwrap();
+                e.finish().unwrap();
+            }
+            ArchiveFormat::TarBz2 => {
+                let mut e = bzip2::write::BzEncoder::new(
+                    std::fs::File::create(path).unwrap(),
+                    bzip2::Compression::fast(),
+                );
+                e.write_all(&bytes).unwrap();
+                e.finish().unwrap();
+            }
+            ArchiveFormat::TarXz => {
+                let mut e = liblzma::write::XzEncoder::new(
+                    std::fs::File::create(path).unwrap(),
+                    1,
+                );
+                e.write_all(&bytes).unwrap();
+                e.finish().unwrap();
+            }
+            ArchiveFormat::TarZst => {
+                let mut e =
+                    zstd::stream::write::Encoder::new(std::fs::File::create(path).unwrap(), 1)
+                        .unwrap();
+                e.write_all(&bytes).unwrap();
+                e.finish().unwrap();
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]
@@ -424,5 +545,101 @@ mod tests {
         let archive = ArchiveFs::open(path.to_str().unwrap()).unwrap();
         assert!(archive.list("nope", true).is_err());
         assert!(archive.read_entry("nope.txt").is_err());
+    }
+
+    #[test]
+    fn every_tar_compression_reads_the_same_tree() {
+        let src = tempfile::tempdir().unwrap();
+        make_tree(src.path());
+
+        for (format, name) in [
+            (ArchiveFormat::Tar, "a.tar"),
+            (ArchiveFormat::TarGz, "a.tar.gz"),
+            (ArchiveFormat::TarBz2, "a.tar.bz2"),
+            (ArchiveFormat::TarXz, "a.tar.xz"),
+            (ArchiveFormat::TarZst, "a.tar.zst"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(name);
+            make_tar(&path, src.path(), format);
+            let archive = ArchiveFs::open(path.to_str().unwrap()).unwrap();
+            assert_eq!(
+                archive.read_entry("index.php").unwrap(),
+                b"<?php echo 1;",
+                "{name}"
+            );
+            assert_eq!(
+                archive.read_entry("docs/nested/deep.txt").unwrap(),
+                b"deep",
+                "{name}"
+            );
+            assert!(archive.list("docs", true).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
+    fn single_file_compressors_expose_one_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt.gz");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
+        encoder.write_all(b"hello gzip").unwrap();
+        encoder.finish().unwrap();
+
+        let archive = ArchiveFs::open(path.to_str().unwrap()).unwrap();
+        let listing = archive.list("", true).unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert_eq!(listing.entries[0].name, "notes.txt");
+        assert_eq!(archive.read_entry("notes.txt").unwrap(), b"hello gzip");
+    }
+
+    /// The cache is a global (the API layer has no path plumbing), so the disk
+    /// round-trip is tested through the explicit helpers instead.
+    #[test]
+    fn index_cache_round_trips_and_invalidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached.zip");
+        make_zip(&path);
+        let fs = ArchiveFs::open(path.to_str().unwrap()).unwrap();
+        let entries = fs.files_under("");
+        assert_eq!(entries, vec!["docs/nested/deep.txt", "docs/readme.txt", "index.php"]);
+
+        let file = dir.path().join("cache.idx");
+        let meta = std::fs::metadata(&path).unwrap();
+        let size = meta.len();
+        let modified = meta.modified().unwrap();
+        let modified_ms = modified
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let cached = CachedIndex {
+            version: CACHE_VERSION,
+            path: path.to_string_lossy().to_string(),
+            size,
+            modified_ms,
+            format: ArchiveFormat::Zip,
+            entries: vec![RawEntry {
+                path: "index.php".into(),
+                is_dir: false,
+                size: 12,
+                modified_ms: None,
+                locator: index::Locator::Zip(0),
+            }],
+        };
+        disk_store_file(&file, &cached);
+        let loaded = disk_load_file(
+            &file,
+            &cached.path,
+            size,
+            modified_ms,
+            ArchiveFormat::Zip,
+        )
+        .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].path, "index.php");
+
+        // A different size means a different archive: the entry must be dropped.
+        assert!(disk_load_file(&file, &cached.path, size + 1, modified_ms, ArchiveFormat::Zip)
+            .is_none());
     }
 }
