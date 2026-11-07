@@ -218,7 +218,7 @@ class _TransferPromptDialogState extends State<TransferPromptDialog> {
               TextField(
                 controller: _dir,
                 autofocus: true,
-                style: const TextStyle(fontSize: 12.5, fontFamily: T.monoFont),
+                style: TextStyle(fontSize: 12.5, fontFamily: T.monoFont),
                 decoration: const InputDecoration(isDense: true),
               ),
               if (single && widget.allowRename) ...[
@@ -230,7 +230,7 @@ class _TransferPromptDialogState extends State<TransferPromptDialog> {
                 const SizedBox(height: 4),
                 TextField(
                   controller: _name,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 12.5,
                     fontFamily: T.monoFont,
                   ),

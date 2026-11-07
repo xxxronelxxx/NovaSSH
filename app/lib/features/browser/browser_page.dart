@@ -11,6 +11,7 @@ import 'package:flutter/services.dart';
 import '../../app/nova.dart';
 import '../../bridge/api.dart';
 import '../../bridge/model.dart';
+import '../../design/file_icons.dart';
 import '../../design/tokens.dart';
 import '../../design/ui.dart';
 import '../connections/connection_progress.dart';
@@ -2074,7 +2075,7 @@ class _BrowserPageState extends State<BrowserPage> {
                     controller: scroll,
                     child: SelectableText(
                       buffer.isEmpty ? 'Подключение…' : buffer.toString(),
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontFamily: T.monoFont,
                         fontSize: 12,
                         height: 1.35,
@@ -2146,7 +2147,7 @@ class _BrowserPageState extends State<BrowserPage> {
                     child: TextField(
                       controller: input,
                       autofocus: true,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontFamily: T.monoFont,
                         fontSize: 12.5,
                       ),
@@ -5578,7 +5579,7 @@ class _BrowserPageState extends State<BrowserPage> {
       onTapDown: (_) => setState(() => _focusPane(ownerTab, pane.scope)),
       child: Container(
         decoration: BoxDecoration(
-          color: T.panel,
+          color: T.fileSurface,
           borderRadius: BorderRadius.circular(T.radius),
           border: Border.all(
             color: active ? T.accent.withValues(alpha: 0.55) : T.border,
@@ -6071,10 +6072,10 @@ class _BrowserPageState extends State<BrowserPage> {
     final isCursor = pane.cursor == index && _isFocused(pane);
     final ruleColor = _ruleColor(entry, pane.scope);
     final baseColor = switch (entry.kind) {
-      EntryKind.dir => T.dir,
-      EntryKind.symlink => T.symlink,
-      EntryKind.other => T.faint,
-      EntryKind.file => T.text,
+      EntryKind.dir => T.dirText,
+      EntryKind.symlink => T.linkText,
+      EntryKind.other => T.otherText,
+      EntryKind.file => T.fileText,
     };
     final nameColor = ruleColor ?? (entry.hidden ? T.faint : baseColor);
 
@@ -6128,21 +6129,7 @@ class _BrowserPageState extends State<BrowserPage> {
             : Colors.transparent,
         child: Row(
           children: [
-            Icon(
-              entry.kind == EntryKind.dir
-                  ? Icons.folder_rounded
-                  : entry.kind == EntryKind.symlink
-                  ? Icons.link
-                  : _isArchive(entry.name)
-                  ? Icons.folder_zip_outlined
-                  : Icons.insert_drive_file_outlined,
-              size: 15,
-              color: entry.kind == EntryKind.dir
-                  ? T.dir
-                  : _isArchive(entry.name)
-                  ? T.archive
-                  : T.faint,
-            ),
+            FileTypeIcon(entry: entry),
             const SizedBox(width: 8),
             if (compareState != null) ...[
               Tooltip(
@@ -6172,7 +6159,7 @@ class _BrowserPageState extends State<BrowserPage> {
                 entry.name,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  fontSize: 12.5,
+                  fontSize: T.fileFontSize,
                   color: nameColor,
                   fontWeight: ruleColor != null
                       ? FontWeight.w500

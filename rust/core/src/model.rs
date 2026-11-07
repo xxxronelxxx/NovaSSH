@@ -505,6 +505,8 @@ pub struct Settings {
     pub security: SecuritySettings,
     #[serde(default)]
     pub window: WindowSettings,
+    #[serde(default)]
+    pub appearance: AppearanceSettings,
 }
 
 impl Default for Settings {
@@ -519,6 +521,41 @@ impl Default for Settings {
             terminal: TerminalSettings::default(),
             security: SecuritySettings::default(),
             window: WindowSettings::default(),
+            appearance: AppearanceSettings::default(),
+        }
+    }
+}
+
+/// Visual preferences: file icons, fonts and panel colours.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppearanceSettings {
+    /// `colored` (WinSCP-style, by file type) or `mono`.
+    pub file_icons: String,
+    /// `filled` or `outline`.
+    pub folder_icons: String,
+    /// Empty = keep the built-in UI font.
+    pub ui_font: String,
+    /// Empty = keep the built-in monospace font.
+    pub mono_font: String,
+    /// Panel row font size, 10..16.
+    pub panel_font_size: u32,
+    /// `#RRGGBB` or empty = the theme colour.
+    pub panel_text: String,
+    /// `#RRGGBB` or empty = the theme colour.
+    pub panel_background: String,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            file_icons: "colored".into(),
+            folder_icons: "filled".into(),
+            ui_font: String::new(),
+            mono_font: String::new(),
+            panel_font_size: 12,
+            panel_text: String::new(),
+            panel_background: String::new(),
         }
     }
 }

@@ -246,7 +246,7 @@ class _AiDialogState extends State<_AiDialog> {
                       ),
                       child: SelectableText(
                         command,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontFamily: T.monoFont,
                           fontSize: 13.5,
                           height: 1.45,

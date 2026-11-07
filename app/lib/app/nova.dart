@@ -54,9 +54,27 @@ class NovaController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Live preview of the appearance tab: applied to `T` without touching disk.
+  /// Cleared by [applySettings] or [clearAppearancePreview].
+  AppearanceSettings? _appearancePreview;
+
+  AppearanceSettings? get appearancePreview => _appearancePreview;
+
+  void previewAppearance(AppearanceSettings appearance) {
+    _appearancePreview = appearance;
+    notifyListeners();
+  }
+
+  void clearAppearancePreview() {
+    if (_appearancePreview == null) return;
+    _appearancePreview = null;
+    notifyListeners();
+  }
+
   Future<void> applySettings(Settings updated) async {
     await saveSettings(settings: updated);
     _themeOverride = null;
+    _appearancePreview = null;
     await reload();
   }
 
@@ -83,6 +101,7 @@ class NovaController extends ChangeNotifier {
         version: s.version,
         locale: s.locale,
         keymapPreset: s.keymapPreset,
+        appearance: s.appearance,
         panels: panels,
         transfer: s.transfer,
         editor: s.editor,

@@ -47,12 +47,70 @@ class T {
   static Color get panelSubtle => _p.panelSubtle;
   static Color get warnSurface => _p.warnSurface;
 
-  // Geometry (theme-independent for now).
+  // -------------------------------------------------------------------------
+  // Appearance (Settings → «Внешний вид»)
+  // -------------------------------------------------------------------------
+
+  /// `colored` (by file type, WinSCP-like) or `mono`.
+  static String _fileIcons = 'colored';
+  /// `filled` or `outline`.
+  static String _folderIcons = 'filled';
+  static String _uiFont = 'Inter';
+  static String _monoFont = 'JetBrains Mono';
+  static double _fileFontSize = 12;
+  static Color? _fileText;
+  static Color? _fileSurface;
+
+  static String get fileIcons => _fileIcons;
+  static String get folderIcons => _folderIcons;
+  static String get uiFont => _uiFont;
+  static String get monoFont => _monoFont;
+  static double get fileFontSize => _fileFontSize;
+  static bool get coloredIcons => _fileIcons == 'colored';
+
+  /// Text colour inside file panes; `null` means "use the theme".
+  static Color? get fileTextOverride => _fileText;
+  static Color? get fileSurfaceOverride => _fileSurface;
+
+  static Color get fileText => _fileText ?? _p.text;
+  static Color get dirText => _fileText ?? _p.dir;
+  static Color get linkText => _fileText ?? _p.symlink;
+  static Color get otherText => _fileText ?? _p.faint;
+  /// Pane background, honouring the override (also used behind link badges).
+  static Color get fileSurface => _fileSurface ?? _p.panel;
+
+  static void useAppearance({
+    required String fileIcons,
+    required String folderIcons,
+    required String uiFont,
+    required String monoFont,
+    required int panelFontSize,
+    required String panelText,
+    required String panelBackground,
+  }) {
+    _fileIcons = fileIcons == 'mono' ? 'mono' : 'colored';
+    _folderIcons = folderIcons == 'outline' ? 'outline' : 'filled';
+    _uiFont = uiFont.trim().isEmpty ? 'Inter' : uiFont.trim();
+    _monoFont = monoFont.trim().isEmpty ? 'JetBrains Mono' : monoFont.trim();
+    _fileFontSize = panelFontSize.clamp(10, 16).toDouble();
+    _fileText = _parseColor(panelText);
+    _fileSurface = _parseColor(panelBackground);
+  }
+
+  static Color? _parseColor(String value) {
+    final hex = value.trim().replaceFirst('#', '');
+    if (hex.length != 6) return null;
+    final parsed = int.tryParse(hex, radix: 16);
+    if (parsed == null) return null;
+    return Color(0xFF000000 | parsed);
+  }
+
+  // Geometry.
   static const double radius = 10.0;
   static const double radiusSmall = 6.0;
-  static const double rowHeight = 26.0;
-  static const double gap = 8.0;
 
-  static const String uiFont = 'Inter';
-  static const String monoFont = 'JetBrains Mono';
+  /// Rows grow with the panel font so larger text is not clipped.
+  static double get rowHeight => (_fileFontSize + 14).clamp(26.0, 33.0);
+
+  static const double gap = 8.0;
 }

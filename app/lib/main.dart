@@ -297,6 +297,18 @@ class NovaApp extends StatelessWidget {
           'system' => PlatformDispatcher.instance.platformBrightness,
           _ => Brightness.dark,
         };
+        final appearance = nova.appearancePreview ?? nova.settings?.appearance;
+        if (appearance != null) {
+          T.useAppearance(
+            fileIcons: appearance.fileIcons,
+            folderIcons: appearance.folderIcons,
+            uiFont: appearance.uiFont,
+            monoFont: appearance.monoFont,
+            panelFontSize: appearance.panelFontSize,
+            panelText: appearance.panelText,
+            panelBackground: appearance.panelBackground,
+          );
+        }
         T.use(brightness == Brightness.light ? lightPalette : darkPalette);
         return MaterialApp(
           navigatorKey: rootNavigatorKey,
@@ -398,6 +410,7 @@ class NovaTitleBar extends StatelessWidget {
           version: 1,
           locale: s.locale,
           keymapPreset: s.keymapPreset,
+          appearance: s.appearance,
           panels: s.panels,
           transfer: s.transfer,
           editor: s.editor,

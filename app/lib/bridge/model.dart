@@ -8,7 +8,7 @@ import 'frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `default_chunks_per_file`, `default_one`, `default_true`, `is_server_scoped`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 // These functions have error during generation (see debug logs or enable `stop_on_error: true` for more details): `dir`, `new`, `new`
 
 /// Provider/model selection for the command assistant. The API key is kept in
@@ -53,6 +53,66 @@ class AiSettings {
           endpoint == other.endpoint &&
           model == other.model &&
           includeContext == other.includeContext;
+}
+
+/// Visual preferences: file icons, fonts and panel colours.
+class AppearanceSettings {
+  /// `colored` (WinSCP-style, by file type) or `mono`.
+  final String fileIcons;
+
+  /// `filled` or `outline`.
+  final String folderIcons;
+
+  /// Empty = keep the built-in UI font.
+  final String uiFont;
+
+  /// Empty = keep the built-in monospace font.
+  final String monoFont;
+
+  /// Panel row font size, 10..16.
+  final int panelFontSize;
+
+  /// `#RRGGBB` or empty = the theme colour.
+  final String panelText;
+
+  /// `#RRGGBB` or empty = the theme colour.
+  final String panelBackground;
+
+  const AppearanceSettings({
+    required this.fileIcons,
+    required this.folderIcons,
+    required this.uiFont,
+    required this.monoFont,
+    required this.panelFontSize,
+    required this.panelText,
+    required this.panelBackground,
+  });
+
+  static Future<AppearanceSettings> default_() =>
+      NovaCore.instance.api.crateModelAppearanceSettingsDefault();
+
+  @override
+  int get hashCode =>
+      fileIcons.hashCode ^
+      folderIcons.hashCode ^
+      uiFont.hashCode ^
+      monoFont.hashCode ^
+      panelFontSize.hashCode ^
+      panelText.hashCode ^
+      panelBackground.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AppearanceSettings &&
+          runtimeType == other.runtimeType &&
+          fileIcons == other.fileIcons &&
+          folderIcons == other.folderIcons &&
+          uiFont == other.uiFont &&
+          monoFont == other.monoFont &&
+          panelFontSize == other.panelFontSize &&
+          panelText == other.panelText &&
+          panelBackground == other.panelBackground;
 }
 
 class Auth {
@@ -1178,6 +1238,7 @@ class Settings {
   final TerminalSettings terminal;
   final SecuritySettings security;
   final WindowSettings window;
+  final AppearanceSettings appearance;
 
   const Settings({
     required this.version,
@@ -1189,6 +1250,7 @@ class Settings {
     required this.terminal,
     required this.security,
     required this.window,
+    required this.appearance,
   });
 
   static Future<Settings> default_() =>
@@ -1204,7 +1266,8 @@ class Settings {
       editor.hashCode ^
       terminal.hashCode ^
       security.hashCode ^
-      window.hashCode;
+      window.hashCode ^
+      appearance.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1219,7 +1282,8 @@ class Settings {
           editor == other.editor &&
           terminal == other.terminal &&
           security == other.security &&
-          window == other.window;
+          window == other.window &&
+          appearance == other.appearance;
 }
 
 /// One saved command for the terminal palette.

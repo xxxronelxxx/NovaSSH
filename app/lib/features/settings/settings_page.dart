@@ -154,6 +154,15 @@ class _SettingsPageState extends State<SettingsPage> {
           version: 1,
           locale: 'ru',
           keymapPreset: 'winscp',
+          appearance: AppearanceSettings(
+            fileIcons: 'colored',
+            folderIcons: 'filled',
+            uiFont: '',
+            monoFont: '',
+            panelFontSize: 12,
+            panelText: '',
+            panelBackground: '',
+          ),
           panels: PanelSettings(
             layout: 'dual',
             showHidden: true,
@@ -371,6 +380,7 @@ class _SettingsPageState extends State<SettingsPage> {
 
   @override
   void dispose() {
+    widget.nova.clearAppearancePreview();
     _syncUrl.dispose();
     _editorPath.dispose();
     _winscpIni.dispose();
@@ -386,6 +396,7 @@ class _SettingsPageState extends State<SettingsPage> {
       version: 1,
       locale: _s.locale,
       keymapPreset: _s.keymapPreset,
+      appearance: _s.appearance,
       panels: _s.panels,
       transfer: _s.transfer,
       editor: EditorSettings(
@@ -446,6 +457,7 @@ class _SettingsPageState extends State<SettingsPage> {
         version: 1,
         locale: _s.locale,
         keymapPreset: _s.keymapPreset,
+        appearance: _s.appearance,
         panels: _s.panels,
         transfer: _s.transfer,
         editor: _s.editor,
@@ -873,7 +885,59 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  static const _uiFonts = [
+    '',
+    'Segoe UI',
+    'Tahoma',
+    'Verdana',
+    'Arial',
+    'Inter',
+    'Roboto',
+  ];
+  static const _monoFonts = [
+    '',
+    'JetBrains Mono',
+    'Consolas',
+    'Cascadia Mono',
+    'Courier New',
+    'Roboto Mono',
+  ];
+  static const _textSwatches = [
+    '#E8ECF3',
+    '#FFFFFF',
+    '#C9D1DB',
+    '#F0C04A',
+    '#8BE28B',
+    '#6CB6FF',
+    '#C08CFF',
+    '#F07A9B',
+  ];
+  static const _backgroundSwatches = [
+    '#141820',
+    '#0B0D12',
+    '#1B2029',
+    '#0E1622',
+    '#151A12',
+    '#FFFFFF',
+    '#F4F6FA',
+    '#FFF8E7',
+  ];
+
+  Widget _sectionLabel(String text) => Padding(
+    padding: const EdgeInsets.only(top: 12, bottom: 4),
+    child: Text(
+      text,
+      style: TextStyle(
+        fontSize: 10.5,
+        letterSpacing: 0.9,
+        fontWeight: FontWeight.w600,
+        color: T.faint,
+      ),
+    ),
+  );
+
   Widget _appearance() {
+    final a = _s.appearance;
     return _card('ВНЕШНИЙ ВИД', [
       _row(
         'Тема',
@@ -905,7 +969,201 @@ class _SettingsPageState extends State<SettingsPage> {
           (v) => setState(() => _s = _copyWindow(solid: v)),
         ),
       ),
+      _sectionLabel('ИКОНКИ'),
+      _row(
+        'Файлы',
+        'Цветные по типу (как в WinSCP) или одноцветные',
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(
+              value: 'colored',
+              label: Text('Цветные'),
+              icon: Icon(Icons.palette_outlined, size: 15),
+            ),
+            ButtonSegment(
+              value: 'mono',
+              label: Text('Моно'),
+              icon: Icon(Icons.format_color_reset_outlined, size: 15),
+            ),
+          ],
+          selected: {a.fileIcons},
+          onSelectionChanged: (v) =>
+              _previewAppearance(_copyAppearance(fileIcons: v.first)),
+          showSelectedIcon: false,
+        ),
+      ),
+      _row(
+        'Папки',
+        'Залитые или контурные',
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(
+              value: 'filled',
+              label: Text('Залитые'),
+              icon: Icon(Icons.folder, size: 15),
+            ),
+            ButtonSegment(
+              value: 'outline',
+              label: Text('Контур'),
+              icon: Icon(Icons.folder_outlined, size: 15),
+            ),
+          ],
+          selected: {a.folderIcons},
+          onSelectionChanged: (v) =>
+              _previewAppearance(_copyAppearance(folderIcons: v.first)),
+          showSelectedIcon: false,
+        ),
+      ),
+      _sectionLabel('ШРИФТЫ'),
+      _row(
+        'Интерфейс',
+        'Системный — шрифт Windows',
+        _fontPicker(
+          value: a.uiFont,
+          families: _uiFonts,
+          onChanged: (v) => _previewAppearance(_copyAppearance(uiFont: v)),
+        ),
+      ),
+      _row(
+        'Моноширинный',
+        'Терминал, редактор, размеры файлов',
+        _fontPicker(
+          value: a.monoFont,
+          families: _monoFonts,
+          onChanged: (v) => _previewAppearance(_copyAppearance(monoFont: v)),
+        ),
+      ),
+      _row(
+        'Размер шрифта панелей',
+        '${a.panelFontSize} пт',
+        SizedBox(
+          width: 190,
+          child: Slider(
+            min: 10,
+            max: 16,
+            divisions: 6,
+            value: a.panelFontSize.clamp(10, 16).toDouble(),
+            label: '${a.panelFontSize}',
+            onChanged: (v) =>
+                _previewAppearance(_copyAppearance(panelFontSize: v.round())),
+          ),
+        ),
+      ),
+      _sectionLabel('ЦВЕТА ПАНЕЛЕЙ'),
+      _row(
+        'Текст',
+        'Пусто = цвет темы',
+        _swatches(
+          current: a.panelText,
+          options: _textSwatches,
+          onPick: (v) => _previewAppearance(_copyAppearance(panelText: v)),
+        ),
+      ),
+      _row(
+        'Фон',
+        'Пусто = цвет темы',
+        _swatches(
+          current: a.panelBackground,
+          options: _backgroundSwatches,
+          onPick: (v) =>
+              _previewAppearance(_copyAppearance(panelBackground: v)),
+        ),
+      ),
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Text(
+          'Изменения применяются сразу; без «Сохранить» они сбросятся при выходе.',
+          style: TextStyle(fontSize: 10.5, color: T.faint),
+        ),
+      ),
     ]);
+  }
+
+  Widget _fontPicker({
+    required String value,
+    required List<String> families,
+    required ValueChanged<String> onChanged,
+  }) {
+    final options = [
+      ...families,
+      if (!families.contains(value)) value,
+    ];
+    return DropdownButton<String>(
+      value: value,
+      dropdownColor: T.menu,
+      underline: const SizedBox.shrink(),
+      style: TextStyle(fontSize: 12.5, color: T.text),
+      items: [
+        for (final family in options)
+          DropdownMenuItem(
+            value: family,
+            child: Text(family.isEmpty ? 'Системный' : family),
+          ),
+      ],
+      onChanged: (v) {
+        if (v != null) onChanged(v);
+      },
+    );
+  }
+
+  Widget _swatches({
+    required String current,
+    required List<String> options,
+    required ValueChanged<String> onPick,
+  }) {
+    final selected = current.trim().toLowerCase();
+    return SizedBox(
+      width: 250,
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: [
+          _swatch(
+            value: '',
+            selected: selected.isEmpty,
+            color: T.accent,
+            onPick: onPick,
+            icon: Icons.auto_awesome,
+          ),
+          for (final value in options)
+            _swatch(
+              value: value,
+              selected: selected == value.toLowerCase(),
+              color: _colorOf(value),
+              onPick: onPick,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _swatch({
+    required String value,
+    required bool selected,
+    required Color color,
+    required ValueChanged<String> onPick,
+    IconData? icon,
+  }) {
+    return Tooltip(
+      message: value.isEmpty ? 'По теме' : value,
+      child: InkWell(
+        onTap: () => onPick(value),
+        customBorder: const CircleBorder(),
+        child: Container(
+          width: 22,
+          height: 22,
+          decoration: BoxDecoration(
+            color: value.isEmpty ? T.panel : color,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: selected ? T.accent : T.borderStrong,
+              width: selected ? 2 : 1,
+            ),
+          ),
+          child: icon == null ? null : Icon(icon, size: 12, color: T.accent),
+        ),
+      ),
+    );
   }
 
   Widget _panels() {
@@ -1131,6 +1389,7 @@ class _SettingsPageState extends State<SettingsPage> {
     version: 1,
     locale: _s.locale,
     keymapPreset: _s.keymapPreset,
+    appearance: _s.appearance,
     panels: _s.panels,
     transfer: _s.transfer,
     editor: _s.editor,
@@ -2022,10 +2281,47 @@ class _SettingsPageState extends State<SettingsPage> {
 
   // ------------------------------------------------------------- copy helpers
 
+  /// Applies the appearance tab immediately (fonts, icons, colours) and keeps
+  /// the value in `_s` so "Сохранить" can persist it.
+  void _previewAppearance(Settings next) {
+    setState(() => _s = next);
+    widget.nova.previewAppearance(next.appearance);
+  }
+
+  Settings _copyAppearance({
+    String? fileIcons,
+    String? folderIcons,
+    String? uiFont,
+    String? monoFont,
+    int? panelFontSize,
+    String? panelText,
+    String? panelBackground,
+  }) => Settings(
+    version: 1,
+    locale: _s.locale,
+    keymapPreset: _s.keymapPreset,
+    appearance: AppearanceSettings(
+      fileIcons: fileIcons ?? _s.appearance.fileIcons,
+      folderIcons: folderIcons ?? _s.appearance.folderIcons,
+      uiFont: uiFont ?? _s.appearance.uiFont,
+      monoFont: monoFont ?? _s.appearance.monoFont,
+      panelFontSize: panelFontSize ?? _s.appearance.panelFontSize,
+      panelText: panelText ?? _s.appearance.panelText,
+      panelBackground: panelBackground ?? _s.appearance.panelBackground,
+    ),
+    panels: _s.panels,
+    transfer: _s.transfer,
+    editor: _s.editor,
+    terminal: _s.terminal,
+    security: _s.security,
+    window: _s.window,
+  );
+
   Settings _copyWindow({bool? solid, String? theme}) => Settings(
     version: 1,
     locale: _s.locale,
     keymapPreset: _s.keymapPreset,
+    appearance: _s.appearance,
     panels: _s.panels,
     transfer: _s.transfer,
     editor: _s.editor,
@@ -2050,6 +2346,7 @@ class _SettingsPageState extends State<SettingsPage> {
     version: 1,
     locale: _s.locale,
     keymapPreset: _s.keymapPreset,
+    appearance: _s.appearance,
     panels: PanelSettings(
       layout: _s.panels.layout,
       showHidden: showHidden ?? _s.panels.showHidden,
@@ -2072,6 +2369,7 @@ class _SettingsPageState extends State<SettingsPage> {
     version: 1,
     locale: _s.locale,
     keymapPreset: _s.keymapPreset,
+    appearance: _s.appearance,
     panels: _s.panels,
     transfer: _s.transfer,
     editor: EditorSettings(
@@ -2093,6 +2391,7 @@ class _SettingsPageState extends State<SettingsPage> {
     version: 1,
     locale: _s.locale,
     keymapPreset: _s.keymapPreset,
+    appearance: _s.appearance,
     panels: _s.panels,
     transfer: TransferSettings(
       concurrency: concurrency ?? _s.transfer.concurrency,
