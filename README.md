@@ -42,7 +42,11 @@ cargo test -p nova_core
 # 3. Генерация моста после правок в rust/core/src/api.rs или model.rs
 flutter_rust_bridge_codegen generate
 
-# 4. Windows: portable ZIP и установщик
+# 4a. Быстро обновить только dist\NovaSSH (без ZIP и установщика).
+#     Папка profile внутри неё — ваши серверы и хранилище — не трогается.
+powershell -ExecutionPolicy Bypass -File tools\refresh-windows.ps1
+
+# 4b. Windows: portable ZIP и установщик (для релиза)
 powershell -ExecutionPolicy Bypass -File tools\package-windows.ps1
 powershell -ExecutionPolicy Bypass -File tools\package-windows-installer.ps1
 # → dist\NovaSSH-<версия>-windows-x64-portable.zip
