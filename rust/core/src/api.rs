@@ -2192,6 +2192,69 @@ pub fn export_profile(path: String) -> Result<(), String> {
     store::save_bytes(std::path::Path::new(&path), &json).map_err(String::from)
 }
 
+/// Builds `host:port<TAB>user<TAB>password` lines for every server that has a
+/// stored password. Key-auth and S3 servers are skipped: they have no password.
+fn credentials_text(a: &App) -> Result<(String, u32), String> {
+    let servers: Vec<Server> = {
+        let book = a.book.lock().map_err(|_| "lock poisoned")?;
+        book.servers.clone()
+    };
+    let vault = a.vault.lock().map_err(|_| "lock poisoned")?;
+    let vault = vault
+        .as_ref()
+        .ok_or("Сначала разблокируйте хранилище — иначе пароли недоступны")?;
+
+    let mut lines = vec![
+        "# NovaSSH — серверы и пароли (открытый текст)".to_string(),
+        "# host:port\tuser\tpassword".to_string(),
+    ];
+    let mut count = 0u32;
+    for server in &servers {
+        if server.auth.kind != AuthKind::Password {
+            continue;
+        }
+        if server.protocol.as_deref() == Some("s3") || server.host.trim().is_empty() {
+            continue;
+        }
+        let id = server
+            .password_ref
+            .clone()
+            .unwrap_or_else(|| format!("pwd_{}", server.id));
+        let password = match vault.get(&id) {
+            Ok(Some(value)) if !value.is_empty() => value,
+            _ => continue,
+        };
+        let mut line = format!(
+            "{}:{}\t{}\t{}",
+            server.host.trim(),
+            server.port,
+            server.user.trim(),
+            password
+        );
+        if !server.name.trim().is_empty() {
+            line.push_str("\t# ");
+            line.push_str(server.name.trim());
+        }
+        lines.push(line);
+        count += 1;
+    }
+    Ok((lines.join("\n") + "\n", count))
+}
+
+/// Text for the "passwords" window: the same content the file export writes.
+pub fn credentials_preview() -> Result<String, String> {
+    let a = app()?;
+    credentials_text(a).map(|(text, _)| text)
+}
+
+/// Writes the plain-text credential list. Returns how many servers it holds.
+pub fn export_credentials(path: String) -> Result<u32, String> {
+    let a = app()?;
+    let (text, count) = credentials_text(a)?;
+    store::save_bytes(std::path::Path::new(&path), text.as_bytes()).map_err(String::from)?;
+    Ok(count)
+}
+
 /// Reads an exported profile. `replace` swaps the whole profile (with a backup
 /// of the current files); otherwise servers and groups are merged by
 /// host+port+user and the local settings are kept.
@@ -4519,6 +4582,17 @@ mod tests {
         let raw = std::fs::read_to_string(&file).unwrap();
         assert!(raw.contains("s3cr3t-value"));
         assert!(raw.contains("df -h"));
+
+        // The dedicated list is a plain host:port/user/password dump.
+        let text = crate::api::credentials_preview().unwrap();
+        assert!(text.contains("example.test:22"), "{text}");
+        assert!(text.contains("root"), "{text}");
+        assert!(text.contains("s3cr3t-value"), "{text}");
+        let dump = dir.path().join("passwords.txt");
+        let written = crate::api::export_credentials(dump.to_string_lossy().to_string()).unwrap();
+        assert_eq!(written, 1);
+        let saved = std::fs::read_to_string(&dump).unwrap();
+        assert!(saved.contains("s3cr3t-value"));
 
         // A damaged file is reported, not silently ignored.
         let broken = dir.path().join("broken.novaprof");

@@ -1889,6 +1889,23 @@ class _ConnectionsPageState extends State<ConnectionsPage> {
     final s3Prefix = TextEditingController(text: draft.s3Prefix ?? '');
     final s3Access = TextEditingController();
     final s3Secret = TextEditingController();
+    // Show what is already stored: the field is masked, the eye reveals it.
+    if (server != null && draft.auth.kind == AuthKind.password) {
+      try {
+        final ref = draft.passwordRef ?? 'pwd_${draft.id}';
+        password.text = await getSecret(id: ref) ?? '';
+      } catch (_) {}
+    }
+    if (server != null && draft.auth.kind == AuthKind.key) {
+      final ref = draft.auth.passphraseRef;
+      if (ref != null) {
+        try {
+          passphrase.text = await getSecret(id: ref) ?? '';
+        } catch (_) {}
+      }
+    }
+    var showPassword = false;
+    var showPassphrase = false;
     var s3PathStyle = draft.s3PathStyle ?? true;
     var authKind = draft.auth.kind;
     var protocol = draft.protocol ?? (draft.port == 21 ? 'ftp' : 'sftp');
@@ -2162,10 +2179,21 @@ class _ConnectionsPageState extends State<ConnectionsPage> {
                     if (authKind == AuthKind.password)
                       NovaField(
                         controller: password,
-                        label: server == null
-                            ? 'Пароль'
-                            : 'Новый пароль (если меняем)',
-                        obscure: true,
+                        label: 'Пароль',
+                        obscure: !showPassword,
+                        suffix: IconButton(
+                          tooltip: showPassword
+                              ? 'Скрыть пароль'
+                              : 'Показать пароль',
+                          icon: Icon(
+                            showPassword
+                                ? Icons.visibility_off_outlined
+                                : Icons.visibility_outlined,
+                            size: 18,
+                          ),
+                          onPressed: () =>
+                              setLocal(() => showPassword = !showPassword),
+                        ),
                       )
                     else ...[
                       Row(
@@ -2210,10 +2238,21 @@ class _ConnectionsPageState extends State<ConnectionsPage> {
                       NovaField(
                         controller: passphrase,
                         label: 'Парольная фраза ключа',
-                        hint: server != null && draft.auth.passphraseRef != null
-                            ? 'оставьте пустым, чтобы не менять'
-                            : 'если ключ зашифрован — необязательно',
-                        obscure: true,
+                        hint: 'если ключ зашифрован — необязательно',
+                        obscure: !showPassphrase,
+                        suffix: IconButton(
+                          tooltip: showPassphrase
+                              ? 'Скрыть парольную фразу'
+                              : 'Показать парольную фразу',
+                          icon: Icon(
+                            showPassphrase
+                                ? Icons.visibility_off_outlined
+                                : Icons.visibility_outlined,
+                            size: 18,
+                          ),
+                          onPressed: () =>
+                              setLocal(() => showPassphrase = !showPassphrase),
+                        ),
                       ),
                       const SizedBox(height: 6),
                       Text(
@@ -2314,7 +2353,9 @@ class _ConnectionsPageState extends State<ConnectionsPage> {
     try {
       await nova.saveServer(
         saved,
-        password: password.text.trim().isEmpty ? null : password.text,
+        password: saved.auth.kind == AuthKind.password && password.text.trim().isNotEmpty
+            ? password.text
+            : null,
         passphrase:
             saved.auth.kind == AuthKind.key && passphrase.text.trim().isNotEmpty
             ? passphrase.text.trim()

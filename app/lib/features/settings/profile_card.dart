@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../../bridge/api.dart';
 import '../../design/tokens.dart';
@@ -111,6 +112,11 @@ class _ProfileCardState extends State<ProfileCard> {
                   icon: Icons.download_outlined,
                   onPressed: _busy ? null : _import,
                 ),
+                GhostButton(
+                  label: 'Пароли (IP:пароль)…',
+                  icon: Icons.password_outlined,
+                  onPressed: _busy ? null : _credentials,
+                ),
               ],
             ),
           ],
@@ -164,6 +170,117 @@ class _ProfileCardState extends State<ProfileCard> {
       _toast('Профиль сохранён: ${location.path}');
     } catch (e) {
       _toast('Экспорт: ${friendlyError(e)}', warn: true);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Plain `host:port  user  password` list: view it in a window, copy it or
+  /// save it to a text file.
+  Future<void> _credentials() async {
+    setState(() => _busy = true);
+    String text;
+    try {
+      text = await credentialsPreview();
+    } catch (e) {
+      if (mounted) setState(() => _busy = false);
+      _toast('Пароли: ${friendlyError(e)}', warn: true);
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+
+    final entries = text
+        .split('\n')
+        .where((line) => line.isNotEmpty && !line.startsWith('#'))
+        .length;
+    if (entries == 0) {
+      _toast('Нет сохранённых паролей', warn: true);
+      return;
+    }
+
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: T.menu,
+        insetPadding: const EdgeInsets.all(24),
+        title: const Text(
+          'Серверы и пароли',
+          style: TextStyle(fontSize: 14),
+        ),
+        content: SizedBox(
+          width: 560,
+          height: 360,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Пароли в открытом виде. Не оставляйте окно на виду.',
+                style: TextStyle(fontSize: 11, color: T.warn, height: 1.35),
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: T.panel,
+                    borderRadius: BorderRadius.circular(T.radiusSmall),
+                    border: Border.all(color: T.border),
+                  ),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      text,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: T.text,
+                        fontFamily: T.monoFont,
+                        height: 1.5,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Закрыть'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'copy'),
+            child: const Text('Копировать'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: const Text('В файл…'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || action == null) return;
+
+    if (action == 'copy') {
+      await Clipboard.setData(ClipboardData(text: text));
+      _toast('Список скопирован');
+      return;
+    }
+
+    final location = await getSaveLocation(
+      suggestedName: 'nova-passwords.txt',
+      acceptedTypeGroups: const [
+        XTypeGroup(label: 'Текст', extensions: ['txt']),
+      ],
+    );
+    if (location == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      final count = await exportCredentials(path: location.path);
+      _toast('Сохранено серверов: $count · ${location.path}');
+    } catch (e) {
+      _toast('Экспорт паролей: ${friendlyError(e)}', warn: true);
     } finally {
       if (mounted) setState(() => _busy = false);
     }

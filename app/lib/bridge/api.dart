@@ -8,7 +8,7 @@ import 'model.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `app`, `apply_ai_if_fresh`, `archive_cancel_tokens`, `archive_entry_dest`, `archive_error`, `archive_folder_name`, `archive_jobs`, `backup_profile`, `chrono_like_stamp`, `civil_from_days`, `connect_cancelled`, `copy_into_folder`, `copy_local_file`, `device_key_supported`, `download_file`, `edit_cache_path`, `ftp_sessions`, `glob_match`, `hash_side`, `load_snippet_book`, `map_book`, `mark_auth_failed`, `mark_reachable`, `merge_snippets`, `now`, `open_archive`, `persist_book`, `provider_for`, `provider_remote`, `read_ref`, `remote_checksum`, `remote_tmp_dirs`, `resolve_existing`, `rt`, `s3_sessions`, `secret`, `sha256_hex`, `store_snippet_book`, `task_cancelled`, `transfer_cancels`, `transfer_slots`, `utc_date_iso`, `wait_for_cancel`, `wait_job_cancel`, `walk_files`
+// These functions are ignored because they are not marked as `pub`: `app`, `apply_ai_if_fresh`, `archive_cancel_tokens`, `archive_entry_dest`, `archive_error`, `archive_folder_name`, `archive_jobs`, `backup_profile`, `chrono_like_stamp`, `civil_from_days`, `connect_cancelled`, `copy_into_folder`, `copy_local_file`, `credentials_text`, `device_key_supported`, `download_file`, `edit_cache_path`, `ftp_sessions`, `glob_match`, `hash_side`, `load_snippet_book`, `map_book`, `mark_auth_failed`, `mark_reachable`, `merge_snippets`, `now`, `open_archive`, `persist_book`, `provider_for`, `provider_remote`, `read_ref`, `remote_checksum`, `remote_tmp_dirs`, `resolve_existing`, `rt`, `s3_sessions`, `secret`, `sha256_hex`, `store_snippet_book`, `task_cancelled`, `transfer_cancels`, `transfer_slots`, `utc_date_iso`, `wait_for_cancel`, `wait_job_cancel`, `walk_files`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `App`, `ArchiveJob`, `ArchiveTokenGuard`, `CancelGuard`, `ProfileFile`, `ProfilePayload`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `drop`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -434,6 +434,14 @@ Future<String> syncExportJson({required bool includeSecrets}) => NovaCore
 /// to `path` as plain JSON.
 Future<void> exportProfile({required String path}) =>
     NovaCore.instance.api.crateApiExportProfile(path: path);
+
+/// Text for the "passwords" window: the same content the file export writes.
+Future<String> credentialsPreview() =>
+    NovaCore.instance.api.crateApiCredentialsPreview();
+
+/// Writes the plain-text credential list. Returns how many servers it holds.
+Future<int> exportCredentials({required String path}) =>
+    NovaCore.instance.api.crateApiExportCredentials(path: path);
 
 /// Reads an exported profile. `replace` swaps the whole profile (with a backup
 /// of the current files); otherwise servers and groups are merged by
