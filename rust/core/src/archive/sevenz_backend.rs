@@ -11,13 +11,17 @@ use sevenz_rust2::{Password, SevenZReader};
 use crate::archive::index::{Locator, RawEntry};
 use crate::error::{NovaError, Result};
 
-fn open(path: &str) -> Result<SevenZReader<std::fs::File>> {
-    SevenZReader::open(path, Password::empty())
+fn open(path: &str, password: Option<&str>) -> Result<SevenZReader<std::fs::File>> {
+    let password = match password {
+        Some(password) => Password::from(password),
+        None => Password::empty(),
+    };
+    SevenZReader::open(path, password)
         .map_err(|e| NovaError::Invalid(format!("cannot read 7z: {e}")))
 }
 
-pub fn scan(path: &str) -> Result<Vec<RawEntry>> {
-    let reader = open(path)?;
+pub fn scan(path: &str, password: Option<&str>) -> Result<Vec<RawEntry>> {
+    let reader = open(path, password)?;
     let archive = reader.archive();
     let mut out = Vec::with_capacity(archive.files.len());
     for file in &archive.files {
@@ -36,6 +40,7 @@ pub fn scan(path: &str) -> Result<Vec<RawEntry>> {
             is_dir: file.is_directory,
             size: if file.is_directory { 0 } else { file.size },
             modified_ms,
+            mode: None,
             locator: Locator::SevenZ,
         });
     }
@@ -45,12 +50,13 @@ pub fn scan(path: &str) -> Result<Vec<RawEntry>> {
 pub fn with_entry<T>(
     path: &str,
     name: &str,
+    password: Option<&str>,
     read: impl FnOnce(&mut dyn Read) -> Result<T>,
 ) -> Result<T> {
     // 7z stores names with either separator depending on the packer, so match
     // on the normalised path instead of the raw header string.
     let target = crate::archive::index::normalize_path(name);
-    let mut reader = open(path)?;
+    let mut reader = open(path, password)?;
     let mut data: Option<Vec<u8>> = None;
     reader
         .for_each_entries(|entry, source| {

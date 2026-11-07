@@ -52,6 +52,7 @@ pub fn scan(path: &str, format: ArchiveFormat) -> Result<Vec<RawEntry>> {
         let is_dir = header.entry_type().is_dir();
         let size = header.size().unwrap_or(0);
         let modified_ms = header.mtime().ok().map(|secs| (secs as i64) * 1000);
+        let mode = header.mode().ok();
         let raw_name = entry.path_bytes();
         if raw_name.is_empty() {
             continue;
@@ -77,6 +78,7 @@ pub fn scan(path: &str, format: ArchiveFormat) -> Result<Vec<RawEntry>> {
             is_dir,
             size: if is_dir { 0 } else { size },
             modified_ms,
+            mode,
             locator,
         });
     }

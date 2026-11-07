@@ -22,6 +22,7 @@ import '../settings/settings_page.dart';
 import '../snippets/snippet_editor.dart';
 import '../snippets/snippet_palette.dart';
 import '../transfer_service.dart';
+import 'archive_dialogs.dart';
 import 'bulk_rename.dart';
 import 'compare_page.dart';
 import 'selection_range.dart';
@@ -74,6 +75,11 @@ class Pane {
 
   /// When set, the pane browses the contents of this archive.
   String? archivePath;
+
+  /// Set when this remote folder is an archive Nova unpacked into /tmp:
+  /// the archive path is kept so Backspace returns to its folder.
+  String? extractedFrom;
+  String? extractedRoot;
 
   /// Per-pane quick filter (typing in one pane must not hide files in the other).
   String filter = '';
@@ -1099,18 +1105,16 @@ class _BrowserPageState extends State<BrowserPage> {
     // Unpacking on the server keeps the archive where it is: no upload of a
     // multi-gigabyte file just to get its contents.
     if (source.scope == 'remote' && target.scope == 'remote') {
-      try {
-        _toast('Распаковка на сервере…');
-        await extractArchive(
-          sessionId: _sessionId,
-          archivePath: archivePath,
-          inner: inner == '/' ? '' : inner,
-          targetDir: target.path,
-        );
+      final path = await _unpackServerArchive(
+        sessionId: _sessionId,
+        archivePath: archivePath,
+        inner: inner == '/' ? '' : inner,
+        targetDir: target.path,
+        title: 'Распаковка на сервере',
+      );
+      if (path != null) {
         _toast('Распаковано в ${target.path}');
         await _load(target, target.path);
-      } catch (e) {
-        _toast('Распаковка: ${friendlyError(e)}', warn: true);
       }
       return;
     }
@@ -1131,6 +1135,10 @@ class _BrowserPageState extends State<BrowserPage> {
       }
     }
 
+    if (source.archivePath == null) {
+      if (!await _ensureArchivePassword(localArchive)) return;
+    }
+
     _track(
       (_) => copyFromArchive(
         sessionId: target.scope == 'remote' ? _sessionId : null,
@@ -1143,6 +1151,184 @@ class _BrowserPageState extends State<BrowserPage> {
       source: fileName(archivePath),
       destination: target.path,
     );
+  }
+
+  /// True when the text suggests a password-protected archive. The Rust side
+  /// prefixes a marker; server tools only speak plain text.
+  bool _looksLikePasswordError(String message) {
+    final lower = message.toLowerCase();
+    return lower.contains('__archive_password__') ||
+        lower.contains('password') ||
+        lower.contains('encrypted') ||
+        lower.contains('пароль');
+  }
+
+  /// Asks for a password before opening a local archive. `true` when the
+  /// archive can be read (no password needed or one was accepted).
+  Future<bool> _ensureArchivePassword(String path) async {
+    bool needed;
+    try {
+      final local = path;
+      needed = await _withArchiveBusy(
+        'Проверяю архив…',
+        () => archiveNeedsPassword(archivePath: local),
+      );
+    } catch (_) {
+      // A broken archive should surface its real error on listing, not here.
+      return true;
+    }
+    if (!needed) return true;
+
+    String? error;
+    while (mounted) {
+      final password = await showArchivePasswordDialog(
+        context,
+        archiveName: fileName(path),
+        error: error,
+      );
+      if (password == null) return false;
+      try {
+        await unlockArchive(archivePath: path, password: password);
+        return true;
+      } catch (e) {
+        error = friendlyError(e);
+      }
+    }
+    return false;
+  }
+
+  /// Unpacks a server archive through the progress window, asking for a
+  /// password when the tool reports an encrypted archive. Returns the folder.
+  Future<String?> _unpackServerArchive({
+    required String sessionId,
+    required String archivePath,
+    required String inner,
+    String targetDir = '',
+    String title = 'Распаковка архива',
+  }) async {
+    String? password;
+    var wrongPassword = false;
+    while (mounted) {
+      final stream = unpackServerArchive(
+        sessionId: sessionId,
+        archivePath: archivePath,
+        inner: inner,
+        targetDir: targetDir,
+        password: password,
+      );
+      final result = await showDialog<ServerArchiveResult>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => ServerArchiveDialog(stream: stream, title: title),
+      );
+      if (!mounted) return null;
+      if (result == null || result.cancelled) return null;
+      if (result.ok) return result.path;
+
+      final error = result.error ?? 'не удалось распаковать архив';
+      if (!wrongPassword && _looksLikePasswordError(error)) {
+        wrongPassword = true;
+        password = await showArchivePasswordDialog(
+          context,
+          archiveName: fileName(archivePath),
+          error: 'Пароль не подошёл или архив повреждён',
+        );
+        if (password == null) return null;
+        continue;
+      }
+      _toast('Архив: $error', warn: true);
+      return null;
+    }
+    return null;
+  }
+
+  /// Opens an archive stored on the server by unpacking it into `/tmp` there.
+  Future<void> _openServerArchive(Pane pane, Entry entry) async {
+    final owner = _tabOf(pane);
+    final path = await _unpackServerArchive(
+      sessionId: owner.connection.sessionId,
+      archivePath: entry.path,
+      inner: '',
+      title: 'Открываю ${entry.name}',
+    );
+    if (path == null || !mounted) return;
+    setState(() {
+      pane.archivePath = null;
+      pane.extractedRoot = path;
+      pane.extractedFrom = entry.path;
+    });
+    await _load(pane, path);
+    _toast('Архив развёрнут на сервере: $path');
+  }
+
+  /// Runs a local archive read behind a spinner that appears only if the
+  /// operation takes longer than a blink.
+  Future<T> _withArchiveBusy<T>(String label, Future<T> Function() run) async {
+    var shown = false;
+    final timer = Timer(const Duration(milliseconds: 350), () {
+      if (!mounted) return;
+      shown = true;
+      unawaited(
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => ArchiveBusyDialog(label: label),
+        ),
+      );
+    });
+    try {
+      return await run();
+    } finally {
+      timer.cancel();
+      if (shown && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+    }
+  }
+
+  static final _volumePatterns = [
+    RegExp(r'\.\d{3,}$'),
+    RegExp(r'\.part\d+\.rar$', caseSensitive: false),
+    RegExp(r'\.r\d{2}$', caseSensitive: false),
+    RegExp(r'\.z\d{2}$', caseSensitive: false),
+  ];
+
+  /// Cheap pre-check for the "assemble volumes" menu item; the Rust side
+  /// validates the whole set.
+  bool _looksLikeVolumes(List<Entry> items) {
+    if (items.length < 2) return false;
+    return items.any(
+      (entry) => _volumePatterns.any((p) => p.hasMatch(entry.name)),
+    );
+  }
+
+  Future<void> _assembleVolumes(Pane pane) async {
+    final items = pane.targets;
+    if (items.length < 2) {
+      _toast('Выделите все части архива', warn: true);
+      return;
+    }
+    final ok = await _confirm(
+      'Собрать ${items.length} частей в один архив?',
+    );
+    if (!ok) return;
+    final owner = _tabOf(pane);
+    _toast('Собираю части…');
+    try {
+      final target = await assembleVolumes(
+        sessionId: pane.scope == 'remote' ? owner.connection.sessionId : null,
+        parts: [for (final entry in items) entry.path],
+        targetPath: null,
+      );
+      _toast(
+        target.toLowerCase().endsWith('.rar')
+            ? 'Собрано: ${fileName(target)} · RAR не поддерживается для просмотра'
+            : 'Собрано: ${fileName(target)}',
+      );
+      await _load(pane, pane.path);
+    } catch (e) {
+      _toast('Сборка: ${friendlyError(e)}', warn: true);
+    }
   }
 
   Future<void> _removeSelection() async {
@@ -1260,10 +1446,13 @@ class _BrowserPageState extends State<BrowserPage> {
     if (entry == null || entry.kind == EntryKind.dir) return;
     try {
       final text = pane.archivePath != null
-          ? await previewArchive(
-              archivePath: pane.archivePath!,
-              inner: entry.path,
-              maxBytes: 262144,
+          ? await _withArchiveBusy(
+              'Читаю файл из архива…',
+              () => previewArchive(
+                archivePath: pane.archivePath!,
+                inner: entry.path,
+                maxBytes: 262144,
+              ),
             )
           : await preview(
               sessionId: pane.scope == 'remote' ? _sessionId : null,
@@ -3005,11 +3194,14 @@ class _BrowserPageState extends State<BrowserPage> {
     final remote = pane.scope == 'remote';
     final targetPath = joinPath(pane.path, choice.name);
     try {
-      final count = await createArchive(
-        sessionId: remote ? _tabOf(pane).connection.sessionId : null,
-        sources: [for (final entry in items) entry.path],
-        targetPath: targetPath,
-        format: choice.format,
+      final count = await _withArchiveBusy(
+        remote ? 'Упаковываю на сервере…' : 'Упаковываю…',
+        () => createArchive(
+          sessionId: remote ? _tabOf(pane).connection.sessionId : null,
+          sources: [for (final entry in items) entry.path],
+          targetPath: targetPath,
+          format: choice.format,
+        ),
       );
       _toast(remote
           ? 'Архив ${choice.name} создан на сервере · объектов: $count'
@@ -3037,14 +3229,21 @@ class _BrowserPageState extends State<BrowserPage> {
       return;
     }
     final inner = target.path == '/' ? '' : target.path.trim();
-    _toast('Добавляю в ${fileName(target.archivePath!)}…');
+    final archiveName = fileName(target.archivePath!);
+    final appendable = RegExp(
+      r'\.(zip|tar)$',
+      caseSensitive: false,
+    ).hasMatch(archiveName);
     try {
-      final count = await copyToArchive(
-        sessionId: source.scope == 'remote' ? _sessionId : null,
-        sources: [for (final entry in items) entry.path],
-        archivePath: target.archivePath!,
-        inner: inner,
-        format: null,
+      final count = await _withArchiveBusy(
+        appendable ? 'Добавляю в $archiveName…' : 'Пересобираю $archiveName…',
+        () => copyToArchive(
+          sessionId: source.scope == 'remote' ? _sessionId : null,
+          sources: [for (final entry in items) entry.path],
+          archivePath: target.archivePath!,
+          inner: inner,
+          format: null,
+        ),
       );
       _toast('Добавлено в архив · файлов: $count');
       await _load(target, target.path);
@@ -3841,6 +4040,14 @@ class _BrowserPageState extends State<BrowserPage> {
             value: 'zip',
             child: Text('Создать архив…', style: TextStyle(fontSize: 12.5)),
           ),
+        if (pane.archivePath == null && _looksLikeVolumes(pane.targets))
+          const PopupMenuItem(
+            value: 'volumes',
+            child: Text(
+              'Собрать части в архив…',
+              style: TextStyle(fontSize: 12.5),
+            ),
+          ),
         if (local) ...[
           const PopupMenuItem(
             value: 'explorer',
@@ -3887,6 +4094,8 @@ class _BrowserPageState extends State<BrowserPage> {
         await _checksumDialog(pane, entry, compareWithOther: true);
       case 'zip':
         await _createArchive(pane);
+      case 'volumes':
+        await _assembleVolumes(pane);
       case 'find':
         await _findFiles();
       case 'chmod':
@@ -3936,6 +4145,15 @@ class _BrowserPageState extends State<BrowserPage> {
   }
 
   Future<void> _up(Pane pane) async {
+    if (pane.extractedRoot != null && pane.path == pane.extractedRoot) {
+      final source = pane.extractedFrom;
+      setState(() {
+        pane.extractedRoot = null;
+        pane.extractedFrom = null;
+      });
+      if (source != null) await _load(pane, parentPath(source));
+      return;
+    }
     if (_syncBrowsing && pane.archivePath == null) {
       final other = pane.scope == 'local' ? _remote : _local;
       final parent = parentPath(pane.path);
@@ -3984,12 +4202,15 @@ class _BrowserPageState extends State<BrowserPage> {
     }
     if (_isArchive(entry.name) && pane.archivePath == null) {
       if (pane.scope != 'local') {
-        _toast(
-          'Архив на сервере: распакуйте его (Ctrl+F5) или скачайте на компьютер',
-        );
+        await _openServerArchive(pane, entry);
         return;
       }
-      setState(() => pane.archivePath = entry.path);
+      if (!await _ensureArchivePassword(entry.path)) return;
+      setState(() {
+        pane.archivePath = entry.path;
+        pane.extractedRoot = null;
+        pane.extractedFrom = null;
+      });
       await _load(pane, '/');
       return;
     }

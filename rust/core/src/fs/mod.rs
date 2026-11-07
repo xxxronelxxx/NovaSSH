@@ -172,6 +172,16 @@ impl Provider {
         }
     }
 
+    /// Sets the modification time. FTP and S3 have no portable call, so the
+    /// timestamp is simply skipped there.
+    pub async fn set_times(&self, path: &str, mtime_ms: i64) -> Result<()> {
+        match self {
+            Self::Local(fs) => fs.set_times(path, mtime_ms).await,
+            Self::Sftp(fs) => fs.set_times(path, mtime_ms).await,
+            Self::Ftp(_) | Self::S3(_) | Self::Archive(_) => Ok(()),
+        }
+    }
+
     pub async fn mkdir(&self, path: &str) -> Result<()> {
         match self {
             Self::Local(fs) => fs.mkdir(path).await,

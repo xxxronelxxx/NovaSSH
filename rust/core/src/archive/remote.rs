@@ -133,6 +133,24 @@ pub fn extract_command(
     archive: &str,
     inner: &str,
     target_dir: &str,
+    password: Option<&str>,
+) -> Result<String> {
+    Ok(format!(
+        "mkdir -p {dir} && {tool} </dev/null",
+        dir = quote(target_dir),
+        tool = extract_tool_command(format, archive, inner, target_dir, password)?,
+    ))
+}
+
+/// The tool invocation alone (no `mkdir`). The server-archive flow needs it
+/// to start it with `exec` after recording the shell PID, so Cancel can kill
+/// exactly that process.
+pub fn extract_tool_command(
+    format: ArchiveFormat,
+    archive: &str,
+    inner: &str,
+    target_dir: &str,
+    password: Option<&str>,
 ) -> Result<String> {
     let inner = inner.trim_matches('/');
     let quoted_archive = quote(archive);
@@ -142,20 +160,28 @@ pub fn extract_command(
     } else {
         format!(" {}", quote(inner))
     };
+    // `-P` / `-p` only when a password is known; encrypted tools must never
+    // wait on stdin, so callers add `</dev/null`.
+    let zip_password = password
+        .map(|password| format!(" -P {}", quote(password)))
+        .unwrap_or_default();
+    let sevenz_password = password
+        .map(|password| format!(" -p{}", quote(password)))
+        .unwrap_or_default();
 
     let command = match format {
         ArchiveFormat::Zip => format!(
-            "mkdir -p {quoted_dir} && unzip -o -q {quoted_archive} -d {quoted_dir}{member}"
+            "unzip -o -q{zip_password} {quoted_archive} -d {quoted_dir}{member}"
         ),
         ArchiveFormat::SevenZ => format!(
-            "mkdir -p {quoted_dir} && 7z x -bd -y {quoted_archive} -o{quoted_dir}{member}"
+            "7z x -bd -y{sevenz_password} {quoted_archive} -o{quoted_dir}{member}"
         ),
         ArchiveFormat::Tar
         | ArchiveFormat::TarGz
         | ArchiveFormat::TarBz2
         | ArchiveFormat::TarXz
         | ArchiveFormat::TarZst => format!(
-            "mkdir -p {quoted_dir} && tar {flags} {quoted_archive} -C {quoted_dir}{member}",
+            "tar {flags} {quoted_archive} -C {quoted_dir}{member}",
             flags = tar_extract_flags(format),
         ),
         single => {
@@ -171,7 +197,7 @@ pub fn extract_command(
                 target_dir.trim_end_matches('/'),
                 if name.is_empty() { "file" } else { &name }
             ));
-            format!("mkdir -p {quoted_dir} && {tool} -dc {quoted_archive} > {out}")
+            format!("{tool} -dc {quoted_archive} > {out}")
         }
     };
     Ok(command)
@@ -272,6 +298,7 @@ mod tests {
             "/srv/a.zip",
             "docs/readme.txt",
             "/srv/out",
+            None,
         )
         .unwrap();
         assert!(command.contains("mkdir -p '/srv/out'"), "{command}");
@@ -283,7 +310,8 @@ mod tests {
     #[test]
     fn single_file_extraction_writes_one_file() {
         let command =
-            extract_command(ArchiveFormat::Gz, "/srv/notes.txt.gz", "", "/srv/out").unwrap();
+            extract_command(ArchiveFormat::Gz, "/srv/notes.txt.gz", "", "/srv/out", None)
+                .unwrap();
         assert!(command.contains("gzip -dc '/srv/notes.txt.gz' > '/srv/out/notes.txt'"),
             "{command}");
     }

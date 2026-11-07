@@ -32,6 +32,8 @@ pub struct RawEntry {
     pub is_dir: bool,
     pub size: u64,
     pub modified_ms: Option<i64>,
+    /// Unix mode when the archive stores one; `None` for formats without it.
+    pub mode: Option<u32>,
     pub locator: Locator,
 }
 
@@ -41,6 +43,7 @@ pub struct ArchiveNode {
     pub is_dir: bool,
     pub size: u64,
     pub modified_ms: Option<i64>,
+    pub mode: Option<u32>,
 }
 
 pub struct ArchiveIndex {
@@ -87,6 +90,7 @@ impl ArchiveIndex {
                     is_dir: true,
                     size: 0,
                     modified_ms: None,
+                    mode: None,
                 });
                 parent = parent_of(&parent);
             }
@@ -103,6 +107,7 @@ impl ArchiveIndex {
                         is_dir: false,
                         size: entry.size,
                         modified_ms: entry.modified_ms,
+                        mode: entry.mode,
                         locator: entry.locator,
                     },
                 );
@@ -114,6 +119,7 @@ impl ArchiveIndex {
                     is_dir,
                     size: if is_dir { 0 } else { entry.size },
                     modified_ms: entry.modified_ms,
+                    mode: entry.mode,
                 },
             );
         }
@@ -203,7 +209,7 @@ impl ArchiveIndex {
             },
             size: node.size,
             modified: node.modified_ms,
-            mode: None,
+            mode: node.mode,
             uid: None,
             gid: None,
             hidden: util::is_probably_hidden(&node.name),
@@ -230,6 +236,7 @@ mod tests {
             is_dir,
             size: if is_dir { 0 } else { 3 },
             modified_ms: None,
+            mode: None,
             locator: Locator::Single,
         }
     }

@@ -29,6 +29,7 @@ pub fn scan(path: &str, format: ArchiveFormat) -> Result<Vec<RawEntry>> {
         is_dir: false,
         size,
         modified_ms: None,
+        mode: None,
         locator: Locator::Single,
     }])
 }

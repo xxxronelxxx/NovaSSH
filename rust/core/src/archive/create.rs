@@ -28,16 +28,25 @@ struct Item {
 
 /// Walks the selected paths and returns their flat, root-relative layout.
 fn collect(sources: &[String], target: &str) -> Result<Vec<Item>> {
+    collect_with_prefix(sources, target, "")
+}
+
+fn collect_with_prefix(sources: &[String], target: &str, prefix: &str) -> Result<Vec<Item>> {
     let target_path = Path::new(target);
     let mut out = Vec::new();
     let mut stack: Vec<(PathBuf, String)> = Vec::new();
 
     for source in sources {
         let path = PathBuf::from(source);
-        let name = util::file_name(source).to_string();
-        if name.is_empty() {
+        let base = util::file_name(source).to_string();
+        if base.is_empty() {
             return Err(NovaError::Invalid(format!("cannot take {source}")));
         }
+        let name = if prefix.trim_matches('/').is_empty() {
+            base
+        } else {
+            format!("{}/{}", prefix.trim_matches('/'), base)
+        };
         stack.push((path, name));
     }
 
@@ -140,6 +149,101 @@ pub fn create_archive(
             Err(e)
         }
     }
+}
+
+/// Appends files/folders to an existing archive **without rewriting it**.
+///
+/// Only ZIP and uncompressed TAR can grow in place: ZIP by appending another
+/// local file + central directory record, TAR by cutting the end-of-archive
+/// marker and writing new entries. Compressed TAR and 7z return
+/// `Unsupported`, and the caller falls back to a full rebuild.
+pub fn append_archive(
+    format: ArchiveFormat,
+    archive_path: &str,
+    sources: &[String],
+) -> Result<CreateReport> {
+    if sources.is_empty() {
+        return Err(NovaError::Invalid("Нечего добавлять".into()));
+    }
+    let items = collect(sources, archive_path)?;
+    match format {
+        ArchiveFormat::Zip => append_zip(&items, archive_path),
+        ArchiveFormat::Tar => append_tar(&items, archive_path),
+        other => Err(NovaError::Unsupported(format!(
+            "{} нельзя дополнить на месте",
+            other.label()
+        ))),
+    }
+}
+
+fn append_zip(items: &[Item], target: &str) -> Result<CreateReport> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(target)?;
+    let mut zip = zip::ZipWriter::new_append(file)
+        .map_err(|e| NovaError::Invalid(format!("cannot append to zip: {e}")))?;
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut report = CreateReport::default();
+    for item in items {
+        if item.is_dir {
+            zip.add_directory(format!("{}/", item.name.trim_end_matches('/')), options)
+                .map_err(|e| NovaError::Invalid(e.to_string()))?;
+            continue;
+        }
+        zip.start_file(item.name.clone(), options)
+            .map_err(|e| NovaError::Invalid(e.to_string()))?;
+        let mut reader = File::open(&item.abs)?;
+        copy_into(&mut reader, &mut zip, &mut report)?;
+    }
+    zip.finish()
+        .map_err(|e| NovaError::Invalid(format!("zip: {e}")))?;
+    Ok(report)
+}
+
+fn append_tar(items: &[Item], target: &str) -> Result<CreateReport> {
+    use std::io::{Seek, SeekFrom};
+
+    // Find where the last member ends, drop the trailing zero blocks and
+    // continue from there. `tar` would otherwise stop at the first marker.
+    let end = {
+        let file = File::open(target)?;
+        let mut archive = tar::Archive::new(file);
+        let mut end = 0u64;
+        let entries = archive
+            .entries()
+            .map_err(|e| NovaError::Invalid(format!("cannot read tar: {e}")))?;
+        for item in entries {
+            let Ok(entry) = item else { continue };
+            let size = entry.header().size().unwrap_or(0);
+            let padded = size.div_ceil(512) * 512;
+            end = end.max(entry.raw_file_position() + padded);
+        }
+        end
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(target)?;
+    file.set_len(end)?;
+    file.seek(SeekFrom::Start(end))?;
+
+    let mut report = CreateReport::default();
+    let mut builder = tar::Builder::new(file);
+    for item in items {
+        builder
+            .append_path_with_name(&item.abs, &item.name)
+            .map_err(|e| NovaError::Invalid(format!("{}: {e}", item.name)))?;
+        if !item.is_dir {
+            report.files += 1;
+            report.bytes += item.size;
+        }
+    }
+    builder.finish()?;
+    Ok(report)
 }
 
 fn write_zip(items: &[Item], target: &str) -> Result<CreateReport> {
@@ -350,6 +454,48 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    #[test]
+    fn append_keeps_existing_entries_for_zip_and_tar() {
+        let (dir, sources) = fixture();
+        for (format, name) in [
+            (ArchiveFormat::Zip, "append.zip"),
+            (ArchiveFormat::Tar, "append.tar"),
+        ] {
+            let target = dir.path().join(name).to_string_lossy().to_string();
+            create_archive(Some(format), &sources, &target).unwrap();
+
+            let extra = dir.path().join("extra.txt");
+            std::fs::write(&extra, b"gamma").unwrap();
+            let report = append_archive(
+                format,
+                &target,
+                &[extra.to_string_lossy().to_string()],
+            )
+            .unwrap();
+            assert_eq!(report.files, 1, "{name}");
+
+            let archive = crate::archive::ArchiveFs::open(&target).unwrap();
+            assert_eq!(archive.read_entry("src/b.txt").unwrap(), b"beta", "{name}");
+            assert_eq!(archive.read_entry("extra.txt").unwrap(), b"gamma", "{name}");
+        }
+    }
+
+    #[test]
+    fn compressed_tar_cannot_be_appended_in_place() {
+        let (dir, sources) = fixture();
+        let target = dir.path().join("append.tar.gz").to_string_lossy().to_string();
+        create_archive(Some(ArchiveFormat::TarGz), &sources, &target).unwrap();
+        let extra = dir.path().join("extra.txt");
+        std::fs::write(&extra, b"gamma").unwrap();
+        let error = append_archive(
+            ArchiveFormat::TarGz,
+            &target,
+            &[extra.to_string_lossy().to_string()],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("нельзя дополнить"));
     }
 
     #[test]

@@ -42,6 +42,18 @@ impl SftpFs {
             .map_err(|e| NovaError::Sftp(format!("chmod: {e}")))
     }
 
+    /// Sets the modification time, used when unpacking archives.
+    pub async fn set_times(&self, path: &str, mtime_ms: i64) -> Result<()> {
+        let mut attrs = russh_sftp::protocol::FileAttributes::default();
+        let seconds = mtime_ms.div_euclid(1000).clamp(0, u32::MAX as i64) as u32;
+        attrs.mtime = Some(seconds);
+        attrs.atime = Some(seconds);
+        self.sftp
+            .set_metadata(path.to_string(), attrs)
+            .await
+            .map_err(|e| NovaError::Sftp(format!("set times: {e}")))
+    }
+
     pub async fn list(&self, path: &str, show_hidden: bool) -> Result<DirListing> {
         let path = if path.trim().is_empty() {
             ".".to_string()

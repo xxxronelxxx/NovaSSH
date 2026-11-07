@@ -13,6 +13,7 @@ mod remote;
 mod sevenz_backend;
 mod single_backend;
 mod tar_backend;
+mod volumes;
 mod zip_backend;
 
 use std::collections::hash_map::DefaultHasher;
@@ -23,10 +24,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
-pub use create::{create_archive, CreateReport};
+pub use create::{append_archive, create_archive, CreateReport};
 pub use format::ArchiveFormat;
 pub use index::{ArchiveIndex, ArchiveNode, RawEntry};
-pub use remote::{extract_command, pack_command, short_error};
+pub use remote::{extract_command, extract_tool_command, pack_command, short_error};
+pub use volumes::{assemble_command, assemble_local, detect as detect_volumes, VolumeSet};
 
 use crate::error::{NovaError, Result};
 use crate::model::{DirListing, Entry};
@@ -36,28 +38,64 @@ use crate::util;
 const MAX_INLINE_ENTRY: u64 = 64 * 1024 * 1024;
 
 /// Bump when the cached layout changes; old index files are then ignored.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
+
+/// Marker the API layer puts in front of a password error so the UI can ask
+/// for one instead of showing a decode failure.
+pub const PASSWORD_MARKER: &str = "__archive_password__";
+
+/// Passwords unlocked in this run, keyed by archive path. Never persisted.
+fn passwords() -> &'static Mutex<std::collections::HashMap<String, String>> {
+    static PASSWORDS: OnceLock<Mutex<std::collections::HashMap<String, String>>> = OnceLock::new();
+    PASSWORDS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn cached_password(path: &str) -> Option<String> {
+    passwords()
+        .lock()
+        .ok()
+        .and_then(|map| map.get(path).cloned())
+}
+
+/// True when the error means "this archive needs a password", not "the
+/// archive is broken".
+pub fn is_password_error(error: &NovaError) -> bool {
+    let text = error.to_string().to_lowercase();
+    text.contains("password") || text.contains("encrypt") || text.contains("пароль")
+}
 
 pub struct ArchiveFs {
     /// Path of the archive itself (local file).
     pub archive_path: String,
     pub format: ArchiveFormat,
     pub index: Arc<ArchiveIndex>,
+    /// Password used to read encrypted entries, when one was unlocked.
+    password: Option<String>,
 }
 
 impl ArchiveFs {
     /// Opens and scans an archive without touching the disk cache.
     pub fn open(path: &str) -> Result<Self> {
-        let format = detect_format(path)?;
-        let entries = scan(path, format)?;
-        Ok(Self::from_entries(path, format, entries))
+        Self::open_with_password(path, cached_password(path).as_deref())
     }
 
-    fn from_entries(path: &str, format: ArchiveFormat, entries: Vec<RawEntry>) -> Self {
+    pub fn open_with_password(path: &str, password: Option<&str>) -> Result<Self> {
+        let format = detect_format(path)?;
+        let entries = scan(path, format, password)?;
+        Ok(Self::from_entries(path, format, entries, password))
+    }
+
+    fn from_entries(
+        path: &str,
+        format: ArchiveFormat,
+        entries: Vec<RawEntry>,
+        password: Option<&str>,
+    ) -> Self {
         Self {
             archive_path: path.to_string(),
             format,
             index: Arc::new(ArchiveIndex::build(entries)),
+            password: password.map(str::to_string),
         }
     }
 
@@ -125,15 +163,21 @@ impl ArchiveFs {
             .raw(&inner)
             .ok_or_else(|| NovaError::NotFound(inner.clone()))?;
         match raw.locator {
-            index::Locator::Zip(_) => {
-                zip_backend::with_entry(&self.archive_path, raw.locator, read)
-            }
+            index::Locator::Zip(_) => zip_backend::with_entry(
+                &self.archive_path,
+                raw.locator,
+                self.password.as_deref(),
+                read,
+            ),
             index::Locator::TarOffset { .. } | index::Locator::Ordinal(_) => {
                 tar_backend::with_entry(&self.archive_path, self.format, raw.locator, read)
             }
-            index::Locator::SevenZ => {
-                sevenz_backend::with_entry(&self.archive_path, &raw.path, read)
-            }
+            index::Locator::SevenZ => sevenz_backend::with_entry(
+                &self.archive_path,
+                &raw.path,
+                self.password.as_deref(),
+                read,
+            ),
             index::Locator::Single => {
                 let mut reader = single_backend::open_reader(&self.archive_path, self.format)?;
                 read(&mut reader)
@@ -180,6 +224,12 @@ impl ArchiveFs {
     }
 }
 
+/// Public format lookup: the server-archive flow needs it before any file is
+/// opened locally.
+pub fn format_for(path: &str) -> Result<ArchiveFormat> {
+    detect_format(path)
+}
+
 fn detect_format(path: &str) -> Result<ArchiveFormat> {
     format::detect(path).ok_or_else(|| {
         NovaError::Unsupported(format!(
@@ -189,10 +239,10 @@ fn detect_format(path: &str) -> Result<ArchiveFormat> {
     })
 }
 
-fn scan(path: &str, format: ArchiveFormat) -> Result<Vec<RawEntry>> {
+fn scan(path: &str, format: ArchiveFormat, password: Option<&str>) -> Result<Vec<RawEntry>> {
     match format {
-        ArchiveFormat::Zip => zip_backend::scan(path),
-        ArchiveFormat::SevenZ => sevenz_backend::scan(path),
+        ArchiveFormat::Zip => zip_backend::scan(path, password),
+        ArchiveFormat::SevenZ => sevenz_backend::scan(path, password),
         f if f.is_tar() => tar_backend::scan(path, f),
         f if f.is_single() => single_backend::scan(path, f),
         other => Err(NovaError::Unsupported(format!(
@@ -224,10 +274,11 @@ pub fn open(path: &str) -> Result<Arc<ArchiveFs>> {
         return Ok(hit);
     }
 
+    let password = cached_password(path);
     let entries = match disk_load(&key, path, size, modified_ms, format) {
         Some(entries) => entries,
         None => {
-            let entries = scan(path, format)?;
+            let entries = scan(path, format, password.as_deref())?;
             disk_store(
                 &key,
                 &CachedIndex {
@@ -243,9 +294,89 @@ pub fn open(path: &str) -> Result<Arc<ArchiveFs>> {
         }
     };
 
-    let fs = Arc::new(ArchiveFs::from_entries(path, format, entries));
+    let fs = Arc::new(ArchiveFs::from_entries(
+        path,
+        format,
+        entries,
+        password.as_deref(),
+    ));
     memory_put(key, fs.clone());
     Ok(fs)
+}
+
+/// Checks the password by reading one byte of the smallest entry, then keeps
+/// it for the rest of the run. Wrong passwords never enter the cache.
+pub fn unlock(path: &str, password: &str) -> Result<()> {
+    let fs = ArchiveFs::open_with_password(path, Some(password))?;
+    let smallest = fs
+        .index
+        .files_under("")
+        .into_iter()
+        .min_by_key(|file| fs.index.node(file).map(|n| n.size).unwrap_or(u64::MAX));
+    if let Some(file) = smallest {
+        fs.with_entry(&file, |reader| {
+            let mut byte = [0u8; 1];
+            reader.read(&mut byte).map_err(NovaError::from)?;
+            Ok(())
+        })?;
+    }
+    if let Ok(mut map) = passwords().lock() {
+        map.insert(path.to_string(), password.to_string());
+    }
+    Ok(())
+}
+
+/// Ignores the password cache: `true` when the content is encrypted even if
+/// the user already unlocked it in this run.
+pub fn is_encrypted(path: &str) -> bool {
+    let fs = match ArchiveFs::open_with_password(path, None) {
+        Ok(fs) => fs,
+        Err(error) => return is_password_error(&error),
+    };
+    let smallest = fs
+        .index
+        .files_under("")
+        .into_iter()
+        .min_by_key(|file| fs.index.node(file).map(|n| n.size).unwrap_or(u64::MAX));
+    let Some(file) = smallest else {
+        return false;
+    };
+    match fs.with_entry(&file, |reader| {
+        let mut byte = [0u8; 1];
+        reader.read(&mut byte).map_err(NovaError::from)?;
+        Ok(())
+    }) {
+        Ok(()) => false,
+        Err(error) => is_password_error(&error),
+    }
+}
+
+/// Probes the archive without a password. Used before opening a pane so the
+/// UI can ask first instead of showing a broken listing.
+pub fn needs_password(path: &str) -> bool {
+    if cached_password(path).is_some() {
+        return false;
+    }
+    let fs = match ArchiveFs::open(path) {
+        Ok(fs) => fs,
+        Err(error) => return is_password_error(&error),
+    };
+    let smallest = fs
+        .index
+        .files_under("")
+        .into_iter()
+        .min_by_key(|file| fs.index.node(file).map(|n| n.size).unwrap_or(u64::MAX));
+    let Some(file) = smallest else {
+        return false;
+    };
+    match fs.with_entry(&file, |reader| {
+        let mut byte = [0u8; 1];
+        reader.read(&mut byte).map_err(NovaError::from)?;
+        Ok(())
+    }) {
+        Ok(()) => false,
+        Err(error) => is_password_error(&error),
+    }
 }
 
 pub fn is_supported(path: &str) -> bool {
@@ -596,6 +727,51 @@ mod tests {
     /// The cache is a global (the API layer has no path plumbing), so the disk
     /// round-trip is tested through the explicit helpers instead.
     #[test]
+    fn encrypted_zip_requires_the_right_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.zip");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        let options: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .with_aes_encryption(zip::AesMode::Aes256, "pass123");
+        zip.start_file("secret.txt", options).unwrap();
+        zip.write_all(b"hidden").unwrap();
+        zip.finish().unwrap();
+        let path = path.to_str().unwrap();
+
+        assert!(needs_password(path));
+        assert!(unlock(path, "wrong").is_err());
+        assert!(needs_password(path));
+
+        unlock(path, "pass123").unwrap();
+        assert!(!needs_password(path));
+        let archive = ArchiveFs::open(path).unwrap();
+        assert_eq!(archive.read_entry("secret.txt").unwrap(), b"hidden");
+    }
+
+    #[test]
+    fn tar_modes_are_exposed_for_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("modes.tar");
+        let file = std::fs::File::create(&path).unwrap();
+        let mut builder = tar::Builder::new(file);
+
+        let mut header = tar::Header::new_gnu();
+        header.set_size(9);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "run.sh", &b"#!/bin/sh"[..])
+            .unwrap();
+        builder.finish().unwrap();
+
+        let archive = ArchiveFs::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(archive.index.node("run.sh").unwrap().mode, Some(0o755));
+        assert_eq!(archive.read_entry("run.sh").unwrap(), b"#!/bin/sh");
+    }
+
+    #[test]
     fn index_cache_round_trips_and_invalidates() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cached.zip");
@@ -623,6 +799,7 @@ mod tests {
                 is_dir: false,
                 size: 12,
                 modified_ms: None,
+                mode: None,
                 locator: index::Locator::Zip(0),
             }],
         };

@@ -1144,6 +1144,23 @@ pub fn disconnect(session_id: String) -> Result<(), String> {
         sessions.remove(&session_id)
     };
     if let Some(session) = session {
+        // Folders created by "open archive on server" live in /tmp; remove
+        // them with the session instead of leaving gigabytes behind.
+        let dirs = remote_tmp_dirs()
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&session_id));
+        if let Some(dirs) = dirs.filter(|dirs| !dirs.is_empty()) {
+            let command = format!(
+                "rm -rf {}",
+                dirs.iter()
+                    .map(|dir| util::shell_escape(dir))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let _ = rt()
+                .block_on(session.exec_result(&command, std::time::Duration::from_secs(30)));
+        }
         let _ = rt().block_on(session.close());
     }
     if let Ok(mut ftp) = ftp_sessions().lock() {
@@ -1776,8 +1793,39 @@ fn archive_folder_name(path: &str) -> String {
     crate::archive::ArchiveFormat::stem(path)
 }
 
+fn archive_error(error: crate::error::NovaError) -> String {
+    if crate::archive::is_password_error(&error) {
+        format!("{}{}", crate::archive::PASSWORD_MARKER, error)
+    } else {
+        error.to_string()
+    }
+}
+
 fn open_archive(path: &str) -> Result<std::sync::Arc<crate::archive::ArchiveFs>, String> {
-    crate::archive::open(path).map_err(String::from)
+    crate::archive::open(path).map_err(|e| {
+        if crate::archive::is_password_error(&e) {
+            format!("{}{}", crate::archive::PASSWORD_MARKER, e)
+        } else {
+            e.to_string()
+        }
+    })
+}
+
+/// `true` when the archive cannot be read without a password. Reads one byte
+/// of the smallest entry: names are visible in most formats, content is not.
+pub fn archive_needs_password(archive_path: String) -> Result<bool, String> {
+    Ok(crate::archive::needs_password(&archive_path))
+}
+
+/// Verifies and remembers a password for this run (never written to disk).
+pub fn unlock_archive(archive_path: String, password: String) -> Result<(), String> {
+    crate::archive::unlock(&archive_path, &password).map_err(|e| {
+        if crate::archive::is_password_error(&e) {
+            "Пароль не подошёл или архив повреждён".to_string()
+        } else {
+            e.to_string()
+        }
+    })
 }
 
 /// Lists a directory inside an archive. Local archives only for now.
@@ -1797,7 +1845,7 @@ pub fn preview_archive(
     max_bytes: u32,
 ) -> Result<String, String> {
     let archive = open_archive(&archive_path)?;
-    let bytes = archive.read_entry(&inner).map_err(String::from)?;
+    let bytes = archive.read_entry(&inner).map_err(archive_error)?;
     let take = bytes.len().min(max_bytes as usize);
     Ok(String::from_utf8_lossy(&bytes[..take]).to_string())
 }
@@ -2542,8 +2590,14 @@ pub fn extract_archive(
             .cloned()
             .ok_or_else(|| "сессия не найдена".to_string())?
     };
-    let command = crate::archive::extract_command(format, &archive_path, &inner, &target_dir)
-        .map_err(String::from)?;
+    let command = crate::archive::extract_command(
+        format,
+        &archive_path,
+        &inner,
+        &target_dir,
+        None,
+    )
+    .map_err(String::from)?;
     let (stdout, stderr, code) = rt()
         .block_on(session.exec_result(&command, std::time::Duration::from_secs(3600)))
         .map_err(|e| e.to_string())?;
@@ -2597,35 +2651,71 @@ pub fn copy_to_archive(
     std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
 
     let result = (|| -> Result<u32, String> {
-        // 1. Existing content, if the archive is not new.
-        if std::path::Path::new(&archive_path).exists() {
-            let archive = open_archive(&archive_path)?;
-            // Empty folders are not in `files_under`; keep them too.
-            for dir in archive.index.all_dirs() {
-                if let Some(dest) = util::join_relative(&work.to_string_lossy(), &dir) {
-                    let _ = std::fs::create_dir_all(dest);
+        let existing = if std::path::Path::new(&archive_path).exists() {
+            // Rewriting an encrypted archive would silently drop the
+            // encryption, and appending would store new entries in clear.
+            if crate::archive::is_encrypted(&archive_path) {
+                return Err("В зашифрованный архив добавлять нельзя".into());
+            }
+            Some(open_archive(&archive_path)?)
+        } else {
+            None
+        };
+        let inner = inner.trim_matches('/').to_string();
+
+        // ZIP and plain TAR can grow in place. When a name is already taken
+        // (or the format cannot append) fall back to the full rewrite below.
+        let mut appendable = existing.is_some();
+        if !matches!(
+            format,
+            crate::archive::ArchiveFormat::Zip | crate::archive::ArchiveFormat::Tar
+        ) {
+            appendable = false;
+        }
+        if let (true, Some(archive)) = (appendable, existing.as_ref()) {
+            for source in &sources {
+                let name = util::file_name(source);
+                let rel = if inner.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{inner}/{name}")
+                };
+                if archive.index.node(&rel).is_some() {
+                    appendable = false;
+                    break;
                 }
             }
-            for file in archive.files_under("") {
-                let Some(dest) = util::join_relative(&work.to_string_lossy(), &file) else {
-                    continue;
-                };
-                if let Some(parent) = util::parent(&dest) {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+
+        // 1. Existing content, but only when the archive has to be rebuilt.
+        if !appendable {
+            if let Some(archive) = existing.as_ref() {
+                // Empty folders are not in `files_under`; keep them too.
+                for dir in archive.index.all_dirs() {
+                    if let Some(dest) = util::join_relative(&work.to_string_lossy(), &dir) {
+                        let _ = std::fs::create_dir_all(dest);
+                    }
                 }
-                let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
-                archive
-                    .with_entry(&file, |reader| {
-                        std::io::copy(reader, &mut out)
-                            .map(|_| ())
-                            .map_err(crate::error::NovaError::from)
-                    })
-                    .map_err(String::from)?;
+                for file in archive.files_under("") {
+                    let Some(dest) = util::join_relative(&work.to_string_lossy(), &file) else {
+                        continue;
+                    };
+                    if let Some(parent) = util::parent(&dest) {
+                        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                    }
+                    let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
+                    archive
+                        .with_entry(&file, |reader| {
+                            std::io::copy(reader, &mut out)
+                                .map(|_| ())
+                                .map_err(crate::error::NovaError::from)
+                        })
+                        .map_err(String::from)?;
+                }
             }
         }
 
         // 2. New files, under `inner`.
-        let inner = inner.trim_matches('/').to_string();
         let mut copied = 0u32;
         for source in &sources {
             let name = util::file_name(source).to_string();
@@ -2640,7 +2730,6 @@ pub fn copy_to_archive(
             copied += copy_into_folder(&provider, source, &dest, remote)?;
         }
 
-        // 3. Rebuild the archive from the temporary tree.
         let children: Vec<String> = std::fs::read_dir(&work)
             .map_err(|e| e.to_string())?
             .flatten()
@@ -2649,9 +2738,17 @@ pub fn copy_to_archive(
         if children.is_empty() {
             return Err("Нечего сохранять".into());
         }
-        crate::archive::create_archive(Some(format), &children, &archive_path)
-            .map(|_| copied)
-            .map_err(String::from)
+
+        // 3a. Append in place when possible; 3b. otherwise rebuild.
+        if appendable {
+            crate::archive::append_archive(format, &archive_path, &children)
+                .map(|_| copied)
+                .map_err(String::from)
+        } else {
+            crate::archive::create_archive(Some(format), &children, &archive_path)
+                .map(|_| copied)
+                .map_err(String::from)
+        }
     })();
 
     let _ = std::fs::remove_dir_all(&work);
@@ -2745,6 +2842,243 @@ fn download_file(
     }
     file.flush().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Joins multi-volume parts (`x.7z.001`, `x.part1.rar`, `x.z01` + `x.zip`)
+/// into one file next to the first part. Returns the joined path.
+pub fn assemble_volumes(
+    session_id: Option<String>,
+    parts: Vec<String>,
+    target_path: Option<String>,
+) -> Result<String, String> {
+    let set = crate::archive::detect_volumes(&parts)
+        .ok_or_else(|| "Выбранные файлы не похожи на части одного архива".to_string())?;
+    let target = match target_path.filter(|path| !path.trim().is_empty()) {
+        Some(path) => path,
+        None => {
+            let parent = util::parent(&set.parts[0]).unwrap_or_else(|| "/".to_string());
+            util::join(&parent, &set.target_name)
+        }
+    };
+
+    let Some(session_id) = session_id else {
+        if std::path::Path::new(&target).exists() {
+            return Err(format!("{target} уже существует"));
+        }
+        crate::archive::assemble_local(&set.parts, &target).map_err(String::from)?;
+        return Ok(target);
+    };
+
+    let a = app()?;
+    let session = {
+        let sessions = a.sessions.lock().map_err(|_| "lock poisoned")?;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| "сессия не найдена".to_string())?
+    };
+    let exists = rt()
+        .block_on(session.exec_result(
+            &format!("test -e {} && echo yes", util::shell_escape(&target)),
+            std::time::Duration::from_secs(20),
+        ))
+        .map(|(stdout, _, _)| stdout.contains("yes"))
+        .unwrap_or(false);
+    if exists {
+        return Err(format!("{target} уже существует"));
+    }
+    let command = crate::archive::assemble_command(&set.parts, &target);
+    let (stdout, stderr, code) = rt()
+        .block_on(session.exec_result(&command, std::time::Duration::from_secs(3600)))
+        .map_err(|e| e.to_string())?;
+    if code != 0 {
+        return Err(crate::archive::short_error(&stdout, &stderr));
+    }
+    Ok(target)
+}
+
+// ---------------------------------------------------------------------------
+// Unpacking a server archive without downloading it
+// ---------------------------------------------------------------------------
+
+struct ArchiveJob {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn archive_jobs() -> &'static std::sync::Mutex<std::collections::HashMap<String, ArchiveJob>> {
+    static JOBS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, ArchiveJob>>,
+    > = std::sync::OnceLock::new();
+    JOBS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Directories Nova created on a server for extracted archives, per session.
+fn remote_tmp_dirs() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>
+{
+    static DIRS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>,
+    > = std::sync::OnceLock::new();
+    DIRS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn wait_job_cancel(flag: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering;
+    while !flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// Stops a running [`unpack_server_archive`] job.
+pub fn cancel_archive_job(job_id: String) -> Result<(), String> {
+    if let Ok(jobs) = archive_jobs().lock() {
+        if let Some(job) = jobs.get(&job_id) {
+            job.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    Ok(())
+}
+
+/// Extracts an archive **on the server** and returns the folder in the final
+/// event's `message`. Empty `target_dir` means a fresh `/tmp/novassh_*` folder.
+///
+/// Emits `Running`, then exactly one of `Done` / `Failed` / `Cancelled`.
+/// Cancelling kills the tool process (its PID is recorded before `exec`).
+pub fn unpack_server_archive(
+    session_id: String,
+    archive_path: String,
+    inner: String,
+    target_dir: String,
+    password: Option<String>,
+    sink: StreamSink<TransferEvent>,
+) -> Result<(), String> {
+    use std::sync::atomic::AtomicBool;
+
+    let a = app()?;
+    let session = {
+        let sessions = a.sessions.lock().map_err(|_| "lock poisoned")?;
+        sessions
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| "сессия не найдена".to_string())?
+    };
+    let format = crate::archive::format_for(&archive_path).map_err(|e| e.to_string())?;
+
+    let job_id = util::new_id("arc");
+    let suffix = job_id.trim_start_matches("arc_");
+    let target = if target_dir.trim().is_empty() {
+        format!("/tmp/novassh_{suffix}")
+    } else {
+        target_dir.trim_end_matches('/').to_string()
+    };
+    let pidfile = format!("/tmp/.novassh_{suffix}.pid");
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    if let Ok(mut jobs) = archive_jobs().lock() {
+        jobs.insert(
+            job_id.clone(),
+            ArchiveJob {
+                cancel: cancel.clone(),
+            },
+        );
+    }
+
+    let name = util::file_name(&archive_path).to_string();
+    let emit = |sink: &StreamSink<TransferEvent>, state: TransferState, message: Option<String>| {
+        let _ = sink.add(TransferEvent {
+            id: job_id.clone(),
+            name: name.clone(),
+            total: 0,
+            done: 0,
+            state,
+            message,
+        });
+    };
+    emit(
+        &sink,
+        TransferState::Running,
+        Some("Распаковка на сервере…".into()),
+    );
+
+    // The shell records its PID and is then replaced by the tool, so killing
+    // that PID stops the extraction itself.
+    let tool = crate::archive::extract_tool_command(
+        format,
+        &archive_path,
+        &inner,
+        &target,
+        password.as_deref(),
+    )
+    .map_err(String::from)?;
+    // `</dev/null`: an encrypted archive must fail, not wait for a password
+    // typed into a channel that will never send one.
+    let command = format!(
+        "mkdir -p {dir} && echo $$ > {pid} && exec {tool} </dev/null",
+        dir = util::shell_escape(&target),
+        pid = util::shell_escape(&pidfile),
+    );
+
+    let result = rt().block_on(async {
+        tokio::select! {
+            result = session.exec_result(&command, std::time::Duration::from_secs(6 * 3600)) => {
+                result.map_err(|e| e.to_string())
+            }
+            _ = wait_job_cancel(&cancel) => Err("__cancelled__".to_string()),
+        }
+    });
+
+    let outcome = match result {
+        Ok((_stdout, _stderr, 0)) => {
+            let _ = rt().block_on(session.exec_result(
+                &format!("rm -f {}", util::shell_escape(&pidfile)),
+                std::time::Duration::from_secs(10),
+            ));
+            if let Ok(mut dirs) = remote_tmp_dirs().lock() {
+                dirs.entry(session_id.clone())
+                    .or_default()
+                    .push(target.clone());
+            }
+            emit(&sink, TransferState::Done, Some(target));
+            Ok(())
+        }
+        Ok((stdout, stderr, _)) => {
+            let message = crate::archive::short_error(&stdout, &stderr);
+            // A failed extraction may have left half a tree behind; a retry
+            // with a password uses a new folder anyway.
+            let _ = rt().block_on(session.exec_result(
+                &format!("rm -rf {}", util::shell_escape(&target)),
+                std::time::Duration::from_secs(20),
+            ));
+            emit(&sink, TransferState::Failed, Some(message));
+            Ok(())
+        }
+        Err(error) if error == "__cancelled__" => {
+            let kill = format!(
+                concat!(
+                    "kill -TERM $(cat {pid} 2>/dev/null) 2>/dev/null; sleep 1; ",
+                    "kill -9 $(cat {pid} 2>/dev/null) 2>/dev/null; ",
+                    "rm -f {pid}; rm -rf {dir}"
+                ),
+                pid = util::shell_escape(&pidfile),
+                dir = util::shell_escape(&target),
+            );
+            let _ = rt()
+                .block_on(session.exec_result(&kill, std::time::Duration::from_secs(20)));
+            emit(
+                &sink,
+                TransferState::Cancelled,
+                Some("Распаковка отменена".into()),
+            );
+            Ok(())
+        }
+        Err(error) => {
+            emit(&sink, TransferState::Failed, Some(error));
+            Ok(())
+        }
+    };
+
+    if let Ok(mut jobs) = archive_jobs().lock() {
+        jobs.remove(&job_id);
+    }
+    outcome
 }
 
 /// Collects files below `root` as `relative path -> entry`.
@@ -3257,7 +3591,7 @@ pub fn copy_from_archive(
     };
 
     let files = archive.files_under(&inner_norm);
-    if files.is_empty() {
+    if files.is_empty() && archive.index.all_dirs().is_empty() {
         return Err("в архиве нет файлов для копирования".into());
     }
 
@@ -3305,6 +3639,41 @@ pub fn copy_from_archive(
         let mut failure: Option<String> = None;
         let mut skipped = 0u64;
         let root_dir = util::join(&target_dir, &base_name);
+
+        // Folders exist in the index even when they hold no files, so create
+        // them up front instead of only their parents. Sorted parents-first.
+        if root_is_dir {
+            let _ = target.mkdir(&root_dir).await;
+        }
+        let mut dir_meta: Vec<(String, Option<u32>, Option<i64>)> = Vec::new();
+        if root_is_dir {
+            for dir in archive.index.all_dirs() {
+                if !inner_norm.is_empty()
+                    && dir != inner_norm
+                    && !dir.starts_with(&format!("{inner_norm}/"))
+                {
+                    continue;
+                }
+                let rel = dir
+                    .strip_prefix(&inner_norm)
+                    .unwrap_or(&dir)
+                    .trim_start_matches('/');
+                if rel.is_empty() {
+                    continue;
+                }
+                let Some(dest) = util::join_relative(&root_dir, rel) else {
+                    continue;
+                };
+                if target.mkdir(&dest).await.is_ok() {
+                    let node = archive.index.node(&dir);
+                    dir_meta.push((
+                        dest,
+                        node.and_then(|n| n.mode),
+                        node.and_then(|n| n.modified_ms),
+                    ));
+                }
+            }
+        }
 
         for file in files {
             let rel = file
@@ -3403,6 +3772,29 @@ pub fn copy_from_archive(
             if let Some(msg) = entry_failed {
                 failure = Some(msg);
                 break;
+            }
+
+            // ZIP and TAR store the unix mode and mtime; restore them so an
+            // extracted script keeps its +x bit and dates.
+            if let Some(node) = archive.index.node(&file) {
+                if let Some(mode) = node.mode.filter(|mode| mode & 0o777 != 0) {
+                    let _ = target.set_mode(&dest, mode).await;
+                }
+                if let Some(modified) = node.modified_ms {
+                    let _ = target.set_times(&dest, modified).await;
+                }
+            }
+        }
+
+        // Directory timestamps last: writing files above changes them.
+        for (dir, mode, modified) in dir_meta.iter().rev() {
+            if let Some(mode) = mode {
+                if *mode & 0o777 != 0 {
+                    let _ = target.set_mode(dir, *mode).await;
+                }
+            }
+            if let Some(modified) = modified {
+                let _ = target.set_times(dir, *modified).await;
             }
         }
 

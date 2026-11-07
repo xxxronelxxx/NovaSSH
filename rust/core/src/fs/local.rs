@@ -180,6 +180,22 @@ impl LocalFs {
         Ok(())
     }
 
+    /// Sets the modification time, used when unpacking archives.
+    pub async fn set_times(&self, path: &str, mtime_ms: i64) -> Result<()> {
+        let path = path.to_string();
+        let seconds = mtime_ms.div_euclid(1000);
+        let nanos = (mtime_ms.rem_euclid(1000) * 1_000_000) as u32;
+        tokio::task::spawn_blocking(move || {
+            filetime::set_file_mtime(
+                &path,
+                filetime::FileTime::from_unix_time(seconds, nanos),
+            )
+            .map_err(crate::error::NovaError::from)
+        })
+        .await
+        .map_err(|e| crate::error::NovaError::Invalid(e.to_string()))?
+    }
+
     /// Human-readable volumes for the drive selector.
     pub fn volumes(&self) -> Vec<Volume> {
         volumes_impl()

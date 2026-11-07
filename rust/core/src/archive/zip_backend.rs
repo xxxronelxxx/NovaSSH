@@ -7,16 +7,20 @@ use std::io::Read;
 use crate::archive::index::{Locator, RawEntry};
 use crate::error::{NovaError, Result};
 
-pub fn scan(path: &str) -> Result<Vec<RawEntry>> {
+pub fn scan(path: &str, password: Option<&str>) -> Result<Vec<RawEntry>> {
     let file = File::open(path)?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| NovaError::Invalid(format!("cannot read archive: {e}")))?;
 
     let mut out = Vec::with_capacity(zip.len());
     for i in 0..zip.len() {
-        let entry = zip
-            .by_index(i)
-            .map_err(|e| NovaError::Invalid(format!("bad entry {i}: {e}")))?;
+        // AES entries cannot even be opened without the password, so the
+        // central-directory scan needs it too.
+        let entry = match password {
+            Some(password) => zip.by_index_decrypt(i, password.as_bytes()),
+            None => zip.by_index(i),
+        }
+        .map_err(|e| NovaError::Invalid(format!("bad entry {i}: {e}")))?;
         // A legacy CP437 name that is not valid UTF-8 must not abort the
         // whole listing: fall back to a lossy decode of the raw bytes.
         let raw_name = match entry.name() {
@@ -32,6 +36,7 @@ pub fn scan(path: &str) -> Result<Vec<RawEntry>> {
             is_dir,
             size: if is_dir { 0 } else { entry.size() },
             modified_ms: entry.last_modified().and_then(datetime_to_ms),
+            mode: entry.unix_mode(),
             locator: Locator::Zip(i as u32),
         });
     }
@@ -41,6 +46,7 @@ pub fn scan(path: &str) -> Result<Vec<RawEntry>> {
 pub fn with_entry<T>(
     path: &str,
     locator: Locator,
+    password: Option<&str>,
     read: impl FnOnce(&mut dyn Read) -> Result<T>,
 ) -> Result<T> {
     let Locator::Zip(index) = locator else {
@@ -49,9 +55,11 @@ pub fn with_entry<T>(
     let file = File::open(path)?;
     let mut zip = zip::ZipArchive::new(file)
         .map_err(|e| NovaError::Invalid(format!("cannot read archive: {e}")))?;
-    let mut entry = zip
-        .by_index(index as usize)
-        .map_err(|e| NovaError::Invalid(format!("bad entry {index}: {e}")))?;
+    let mut entry = match password {
+        Some(password) => zip.by_index_decrypt(index as usize, password.as_bytes()),
+        None => zip.by_index(index as usize),
+    }
+    .map_err(|e| NovaError::Invalid(format!("bad entry {index}: {e}")))?;
     read(&mut entry)
 }
 

@@ -8,8 +8,8 @@ import 'model.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `app`, `apply_ai_if_fresh`, `archive_entry_dest`, `archive_folder_name`, `backup_profile`, `chrono_like_stamp`, `civil_from_days`, `connect_cancelled`, `copy_into_folder`, `device_key_supported`, `download_file`, `edit_cache_path`, `ftp_sessions`, `glob_match`, `hash_side`, `load_snippet_book`, `map_book`, `mark_auth_failed`, `mark_reachable`, `merge_snippets`, `now`, `open_archive`, `pack_remote`, `persist_book`, `provider_for`, `provider_remote`, `read_ref`, `remote_checksum`, `resolve_existing`, `rt`, `s3_sessions`, `secret`, `sha256_hex`, `store_snippet_book`, `transfer_cancels`, `transfer_slots`, `utc_date_iso`, `wait_for_cancel`, `walk_files`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `App`, `CancelGuard`, `ProfileFile`, `ProfilePayload`
+// These functions are ignored because they are not marked as `pub`: `app`, `apply_ai_if_fresh`, `archive_entry_dest`, `archive_error`, `archive_folder_name`, `archive_jobs`, `backup_profile`, `chrono_like_stamp`, `civil_from_days`, `connect_cancelled`, `copy_into_folder`, `device_key_supported`, `download_file`, `edit_cache_path`, `ftp_sessions`, `glob_match`, `hash_side`, `load_snippet_book`, `map_book`, `mark_auth_failed`, `mark_reachable`, `merge_snippets`, `now`, `open_archive`, `pack_remote`, `persist_book`, `provider_for`, `provider_remote`, `read_ref`, `remote_checksum`, `remote_tmp_dirs`, `resolve_existing`, `rt`, `s3_sessions`, `secret`, `sha256_hex`, `store_snippet_book`, `transfer_cancels`, `transfer_slots`, `utc_date_iso`, `wait_for_cancel`, `wait_job_cancel`, `walk_files`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `App`, `ArchiveJob`, `CancelGuard`, `ProfileFile`, `ProfilePayload`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Asks a running transfer to stop; returns false when it already finished.
@@ -364,6 +364,22 @@ Future<void> clearServerTmp({required String serverName}) =>
 /// Removes every temporary file, used on shutdown and after a crash recovery.
 Future<void> clearAllTmp() => NovaCore.instance.api.crateApiClearAllTmp();
 
+/// `true` when the archive cannot be read without a password. Reads one byte
+/// of the smallest entry: names are visible in most formats, content is not.
+Future<bool> archiveNeedsPassword({required String archivePath}) => NovaCore
+    .instance
+    .api
+    .crateApiArchiveNeedsPassword(archivePath: archivePath);
+
+/// Verifies and remembers a password for this run (never written to disk).
+Future<void> unlockArchive({
+  required String archivePath,
+  required String password,
+}) => NovaCore.instance.api.crateApiUnlockArchive(
+  archivePath: archivePath,
+  password: password,
+);
+
 /// Lists a directory inside an archive. Local archives only for now.
 Future<DirListing> listArchive({
   required String archivePath,
@@ -494,6 +510,41 @@ Future<int> copyToArchive({
   archivePath: archivePath,
   inner: inner,
   format: format,
+);
+
+/// Joins multi-volume parts (`x.7z.001`, `x.part1.rar`, `x.z01` + `x.zip`)
+/// into one file next to the first part. Returns the joined path.
+Future<String> assembleVolumes({
+  String? sessionId,
+  required List<String> parts,
+  String? targetPath,
+}) => NovaCore.instance.api.crateApiAssembleVolumes(
+  sessionId: sessionId,
+  parts: parts,
+  targetPath: targetPath,
+);
+
+/// Stops a running [`unpack_server_archive`] job.
+Future<void> cancelArchiveJob({required String jobId}) =>
+    NovaCore.instance.api.crateApiCancelArchiveJob(jobId: jobId);
+
+/// Extracts an archive **on the server** and returns the folder in the final
+/// event's `message`. Empty `target_dir` means a fresh `/tmp/novassh_*` folder.
+///
+/// Emits `Running`, then exactly one of `Done` / `Failed` / `Cancelled`.
+/// Cancelling kills the tool process (its PID is recorded before `exec`).
+Stream<TransferEvent> unpackServerArchive({
+  required String sessionId,
+  required String archivePath,
+  required String inner,
+  required String targetDir,
+  String? password,
+}) => NovaCore.instance.api.crateApiUnpackServerArchive(
+  sessionId: sessionId,
+  archivePath: archivePath,
+  inner: inner,
+  targetDir: targetDir,
+  password: password,
 );
 
 /// Compares both trees and proposes upload/download actions per file.
