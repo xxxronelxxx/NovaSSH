@@ -832,6 +832,46 @@ fn provider_remote(a: &App, session_id: &str) -> Result<Provider, String> {
     Err(format!("no such session: {session_id}"))
 }
 
+/// Set by the progress window's Cancel button. The next [`connect`] clears it;
+/// the SSH handshake races against it, so cancelling closes the socket instead
+/// of waiting out the timeout.
+static CONNECT_CANCELLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Server id of the attempt in flight, so Cancel cannot abort a silent
+/// restore of another tab by accident.
+static CONNECT_TARGET: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+const CONNECT_CANCELLED_MSG: &str = "Соединение отменено";
+
+fn connect_cancelled() -> bool {
+    CONNECT_CANCELLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Cancels the connection attempt that is currently in flight.
+///
+/// The call returns immediately: `connect` notices the flag, closes what it
+/// already opened, and reports an error that the progress window ignores.
+/// Only the attempt for `server_id` is cancelled.
+pub fn cancel_connect(server_id: String) -> Result<(), String> {
+    let target = CONNECT_TARGET
+        .lock()
+        .ok()
+        .and_then(|current| current.clone());
+    if target.as_deref() == Some(server_id.as_str()) {
+        CONNECT_CANCELLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    Ok(())
+}
+
+/// Resolves as soon as the flag is raised. Polling keeps it free of races:
+/// there is no notification window in which a cancel could be missed.
+async fn wait_for_cancel() {
+    while !connect_cancelled() {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConnectResult {
     pub session_id: String,
@@ -844,6 +884,11 @@ pub struct ConnectResult {
 
 pub fn connect(server_id: String, password: Option<String>) -> Result<ConnectResult, String> {
     let a = app()?;
+    // A fresh attempt starts un-cancelled, even if the previous one was.
+    CONNECT_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut target) = CONNECT_TARGET.lock() {
+        *target = Some(server_id.clone());
+    }
     let server = {
         let book = a.book.lock().map_err(|_| "lock poisoned")?;
         book.server(&server_id)
@@ -883,6 +928,9 @@ pub fn connect(server_id: String, password: Option<String>) -> Result<ConnectRes
         )?);
         rt().block_on(fs.list("/", true))
             .map_err(|e| e.to_string())?;
+        if connect_cancelled() {
+            return Err(CONNECT_CANCELLED_MSG.to_string());
+        }
         let session_id = util::new_id("conn");
         s3_sessions()
             .lock()
@@ -955,6 +1003,9 @@ pub fn connect(server_id: String, password: Option<String>) -> Result<ConnectRes
         let _listing = rt()
             .block_on(ftp.list("/", true))
             .map_err(|e| e.to_string())?;
+        if connect_cancelled() {
+            return Err(CONNECT_CANCELLED_MSG.to_string());
+        }
         let session_id = util::new_id("conn");
         ftp_sessions()
             .lock()
@@ -982,13 +1033,23 @@ pub fn connect(server_id: String, password: Option<String>) -> Result<ConnectRes
     };
 
     util::set_connect_stage(1);
-    let session = match rt().block_on(ssh::connect(&opts)) {
+    let session = match rt().block_on(async {
+        tokio::select! {
+            result = ssh::connect(&opts) => result.map_err(|e| e.to_string()),
+            _ = wait_for_cancel() => Err(CONNECT_CANCELLED_MSG.to_string()),
+        }
+    }) {
         Ok(session) => session,
         Err(e) => {
             util::set_connect_stage(0);
-            return Err(e.to_string());
+            return Err(e);
         }
     };
+    if connect_cancelled() {
+        util::set_connect_stage(0);
+        let _ = rt().block_on(session.close());
+        return Err(CONNECT_CANCELLED_MSG.to_string());
+    }
     util::set_connect_stage(4);
 
     let fingerprint_now = session.fingerprint.clone();
@@ -1006,6 +1067,12 @@ pub fn connect(server_id: String, password: Option<String>) -> Result<ConnectRes
     let tools = rt()
         .block_on(session.detect_archive_tools())
         .unwrap_or_default();
+
+    if connect_cancelled() {
+        util::set_connect_stage(0);
+        let _ = rt().block_on(session.close());
+        return Err(CONNECT_CANCELLED_MSG.to_string());
+    }
 
     {
         let mut sessions = a.sessions.lock().map_err(|_| "lock poisoned")?;
@@ -3726,6 +3793,26 @@ fn mark_auth_failed(a: &App, server_id: &str, failed: bool) {
 #[cfg(test)]
 mod tests {
     use super::{archive_entry_dest, transfer_slots};
+
+    /// The progress window's Cancel must never abort another tab's silent
+    /// reconnection, so the flag is matched against the server id.
+    #[test]
+    fn cancel_is_scoped_to_the_server_in_flight() {
+        use std::sync::atomic::Ordering;
+
+        if let Ok(mut target) = super::CONNECT_TARGET.lock() {
+            *target = Some("srv-a".to_string());
+        }
+        super::CONNECT_CANCELLED.store(false, Ordering::SeqCst);
+
+        super::cancel_connect("srv-b".into()).unwrap();
+        assert!(!super::connect_cancelled());
+
+        super::cancel_connect("srv-a".into()).unwrap();
+        assert!(super::connect_cancelled());
+
+        super::CONNECT_CANCELLED.store(false, Ordering::SeqCst);
+    }
 
     #[test]
     fn profile_export_and_import_roundtrip() {

@@ -311,13 +311,24 @@ class _ConnectionsPageState extends State<ConnectionsPage> {
       final outcome = ValueNotifier<ConnectionOutcome>(
         ConnectionOutcome.pending,
       );
+      var cancelled = false;
       if (mounted) {
         unawaited(
           showDialog<void>(
             context: context,
             barrierDismissible: false,
-            builder: (_) =>
-                ConnectionProgressDialog(server: server, outcome: outcome),
+            builder: (_) => ConnectionProgressDialog(
+              server: server,
+              outcome: outcome,
+              onCancel: () {
+                if (cancelled) return;
+                cancelled = true;
+                unawaited(cancelConnect(serverId: server.id));
+                if (mounted) {
+                  Navigator.of(context, rootNavigator: true).pop();
+                }
+              },
+            ),
           ),
         );
       }
@@ -325,9 +336,18 @@ class _ConnectionsPageState extends State<ConnectionsPage> {
       ConnectResult result;
       try {
         result = await nova.connect(server, password: password);
+        if (cancelled) {
+          outcome.dispose();
+          unawaited(disconnect(sessionId: result.sessionId).catchError((_) {}));
+          return;
+        }
         outcome.value = ConnectionOutcome.success;
         await Future<void>.delayed(const Duration(milliseconds: 350));
       } catch (e) {
+        if (cancelled) {
+          outcome.dispose();
+          return;
+        }
         // Stop on the failing step instead of pretending everything succeeded.
         outcome.value = ConnectionOutcome.failure;
         await Future<void>.delayed(const Duration(milliseconds: 600));

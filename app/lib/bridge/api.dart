@@ -8,7 +8,7 @@ import 'model.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `app`, `apply_ai_if_fresh`, `archive_entry_dest`, `archive_folder_name`, `backup_profile`, `chrono_like_stamp`, `civil_from_days`, `copy_into_folder`, `device_key_supported`, `download_file`, `edit_cache_path`, `ftp_sessions`, `glob_match`, `hash_side`, `load_snippet_book`, `map_book`, `mark_auth_failed`, `mark_reachable`, `merge_snippets`, `now`, `open_archive`, `pack_remote`, `persist_book`, `provider_for`, `provider_remote`, `read_ref`, `remote_checksum`, `resolve_existing`, `rt`, `s3_sessions`, `secret`, `sha256_hex`, `store_snippet_book`, `transfer_cancels`, `transfer_slots`, `utc_date_iso`, `walk_files`
+// These functions are ignored because they are not marked as `pub`: `app`, `apply_ai_if_fresh`, `archive_entry_dest`, `archive_folder_name`, `backup_profile`, `chrono_like_stamp`, `civil_from_days`, `connect_cancelled`, `copy_into_folder`, `device_key_supported`, `download_file`, `edit_cache_path`, `ftp_sessions`, `glob_match`, `hash_side`, `load_snippet_book`, `map_book`, `mark_auth_failed`, `mark_reachable`, `merge_snippets`, `now`, `open_archive`, `pack_remote`, `persist_book`, `provider_for`, `provider_remote`, `read_ref`, `remote_checksum`, `resolve_existing`, `rt`, `s3_sessions`, `secret`, `sha256_hex`, `store_snippet_book`, `transfer_cancels`, `transfer_slots`, `utc_date_iso`, `wait_for_cancel`, `walk_files`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `App`, `CancelGuard`, `ProfileFile`, `ProfilePayload`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
@@ -195,6 +195,14 @@ Future<String> homeLocal() => NovaCore.instance.api.crateApiHomeLocal();
 
 Future<BigInt> freeSpaceLocal({required String path}) =>
     NovaCore.instance.api.crateApiFreeSpaceLocal(path: path);
+
+/// Cancels the connection attempt that is currently in flight.
+///
+/// The call returns immediately: `connect` notices the flag, closes what it
+/// already opened, and reports an error that the progress window ignores.
+/// Only the attempt for `server_id` is cancelled.
+Future<void> cancelConnect({required String serverId}) =>
+    NovaCore.instance.api.crateApiCancelConnect(serverId: serverId);
 
 Future<ConnectResult> connect({required String serverId, String? password}) =>
     NovaCore.instance.api.crateApiConnect(

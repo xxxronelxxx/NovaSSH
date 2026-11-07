@@ -20,10 +20,14 @@ class ConnectionProgressDialog extends StatefulWidget {
     super.key,
     required this.server,
     required this.outcome,
+    this.onCancel,
   });
 
   final Server server;
   final ValueListenable<ConnectionOutcome> outcome;
+
+  /// Stops the attempt. Only offered while the outcome is still pending.
+  final VoidCallback? onCancel;
 
   @override
   State<ConnectionProgressDialog> createState() => _ConnectionProgressDialogState();
@@ -142,7 +146,15 @@ class _ConnectionProgressDialogState extends State<ConnectionProgressDialog> {
           ),
         ],
       ),
-      actions: const [SizedBox(height: 6)],
+      actions: [
+        if (_outcome == ConnectionOutcome.pending && widget.onCancel != null)
+          TextButton(
+            onPressed: widget.onCancel,
+            child: const Text('Отмена'),
+          )
+        else
+          const SizedBox(height: 6),
+      ],
     );
   }
 }
