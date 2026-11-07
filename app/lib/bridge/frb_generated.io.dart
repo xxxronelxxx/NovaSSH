@@ -40,6 +40,9 @@ abstract class NovaCoreApiImplPlatform extends BaseApiImpl<NovaCoreWire> {
   AppInfo dco_decode_app_info(dynamic raw);
 
   @protected
+  AppearanceSettings dco_decode_appearance_settings(dynamic raw);
+
+  @protected
   Auth dco_decode_auth(dynamic raw);
 
   @protected
@@ -352,6 +355,11 @@ abstract class NovaCoreApiImplPlatform extends BaseApiImpl<NovaCoreWire> {
 
   @protected
   AppInfo sse_decode_app_info(SseDeserializer deserializer);
+
+  @protected
+  AppearanceSettings sse_decode_appearance_settings(
+    SseDeserializer deserializer,
+  );
 
   @protected
   Auth sse_decode_auth(SseDeserializer deserializer);
@@ -684,6 +692,12 @@ abstract class NovaCoreApiImplPlatform extends BaseApiImpl<NovaCoreWire> {
 
   @protected
   void sse_encode_app_info(AppInfo self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_appearance_settings(
+    AppearanceSettings self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_auth(Auth self, SseSerializer serializer);
