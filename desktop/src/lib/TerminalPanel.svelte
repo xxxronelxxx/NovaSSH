@@ -85,8 +85,7 @@
 
   function writeCommand(command: string, run: boolean) {
     if (!shellId) return;
-    api.shellWrite(shellId, run ? `${command}
-` : command).catch(() => {});
+    api.shellWrite(shellId, run ? `${command}\r` : command).catch(() => {});
     term?.focus();
   }
 

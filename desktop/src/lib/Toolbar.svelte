@@ -29,6 +29,8 @@
     canCompare = false,
     canSync = false,
     canExtract = false,
+    compareDirs = false,
+    syncNavigation = false,
     terminalOpen = false,
     filter = "",
     onBack,
@@ -38,6 +40,8 @@
     onCompare,
     onSync,
     onExtract,
+    onCompareDirs,
+    onSyncNavigation,
     onRename,
     onDelete,
     onMkdir,
@@ -63,6 +67,8 @@
     onCompare: () => void;
     onSync: () => void;
     onExtract: () => void;
+    onCompareDirs: () => void;
+    onSyncNavigation: () => void;
     onRename: () => void;
     onDelete: () => void;
     onMkdir: () => void;
@@ -99,6 +105,22 @@
     <Diff size={16} />
   </button>
   <button class="tool" title="Синхронная навигация" disabled>
+    <ArrowLeftRight size={16} />
+  </button>
+  <button
+    class="tool"
+    class:accent={compareDirs}
+    title="Сравнить каталоги панелей"
+    onclick={onCompareDirs}
+  >
+    <Diff size={16} />
+  </button>
+  <button
+    class="tool"
+    class:accent={syncNavigation}
+    title="Синхронная навигация панелей"
+    onclick={onSyncNavigation}
+  >
     <ArrowLeftRight size={16} />
   </button>
   <button class="tool" title="Синхронизация каталогов" disabled={!canSync} onclick={onSync}>

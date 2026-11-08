@@ -6,7 +6,6 @@
     formatBytes,
     formatDate,
     formatMode,
-    sortEntries,
     type ColorRule,
     type DirListing,
     type Entry,
@@ -30,6 +29,8 @@
     canAdd = false,
     rootLabel,
     otherNames,
+    otherEntries,
+    compareMode = false,
     onSelectTab,
     onCloseTab,
     onContextMenu,
@@ -51,6 +52,8 @@
     canAdd?: boolean;
     rootLabel?: string;
     otherNames?: Set<string>;
+    otherEntries?: Entry[];
+    compareMode?: boolean;
     onSelectTab: (id: string) => void;
     onCloseTab?: (id: string) => void;
     onContextMenu?: (entry: Entry | null, event: MouseEvent) => void;
@@ -71,6 +74,24 @@
   let dragOver = $state(false);
 
   const selectedSet = $derived(new Set(selected));
+
+  const compareMap = $derived(
+    new Map(
+      (otherEntries ?? []).map((entry) => [
+        entry.name.toLowerCase(),
+        entry,
+      ]),
+    ),
+  );
+
+  function compareState(entry: Entry): string | null {
+    if (!compareMode && !otherNames) return null;
+    const other = compareMap.get(entry.name.toLowerCase());
+    if (!other) return "only";
+    if (other.kind !== entry.kind) return "different";
+    if (entry.kind !== "dir" && other.size !== entry.size) return "different";
+    return "equal";
+  }
 
   onMount(async () => {
     try {
@@ -348,7 +369,8 @@
       <button
         class="row"
         class:selected={selectedSet.has(entry.path)}
-        class:only-here={!!otherNames && !otherNames.has(entry.name)}
+        class:only-here={(compareMode || otherNames) && compareState(entry) === "only"}
+        class:different={compareState(entry) === "different"}
         draggable="true"
         ondragstart={(event) => startDrag(entry, event)}
         onpointerdown={(event) => {
@@ -612,6 +634,10 @@
 
   .row.only-here .name {
     color: var(--accent);
+  }
+
+  .row.different .name {
+    color: var(--warn);
   }
 
   .row:hover {

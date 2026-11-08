@@ -429,6 +429,13 @@
           <div class="card-title">Передачи</div>
           <div class="row"><div class="label">Ограничение скорости<small>0 — без ограничения</small></div><input class="num" type="number" min="0" bind:value={s.transfer.bandwidthLimitKibps} /> КБ/с</div>
           <div class="row"><div class="label">Одновременных передач</div><input class="num" type="number" min="1" max="8" bind:value={s.transfer.concurrency} /></div>
+          <div class="row"><div class="label">Потоков на один файл<small>Файлы больше 8 МБ режутся на части</small></div>
+            <select bind:value={s.transfer.chunksPerFile}>
+              {#each [1, 2, 3, 4, 6, 8] as value (value)}
+                <option {value}>{value}</option>
+              {/each}
+            </select>
+          </div>
           <div class="row"><div class="label">Конфликт имён</div>
             <select bind:value={s.transfer.conflictPolicy}>
               <option value="ask">Спрашивать</option>

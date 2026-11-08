@@ -130,6 +130,7 @@
   let compareOpen = $state(false);
   let bulkOpen = $state(false);
   let bookmarksOpen = $state(false);
+  let dirCompare = $state(false);
   let transferPrompt = $state<{
     direction: "upload" | "download";
     items: Entry[];
@@ -218,7 +219,9 @@
   const remoteNames = $derived(
     new Set((remote?.entries ?? []).map((entry) => entry.name)),
   );
-  const comparePanels = $derived(settings?.panels?.comparePanels === true);
+  const comparePanels = $derived(
+    settings?.panels?.comparePanels === true || dirCompare,
+  );
 
   const canCopy = $derived.by(() => {
     if (focused === "local") {
@@ -677,6 +680,54 @@
     };
   });
 
+  function toggleDirCompare() {
+    dirCompare = !dirCompare;
+    if (!dirCompare) return;
+    const localByName = new Map(
+      (localListing?.entries ?? []).map((entry) => [
+        entry.name.toLowerCase(),
+        entry,
+      ]),
+    );
+    const remoteByName = new Map(
+      (remote?.entries ?? []).map((entry) => [
+        entry.name.toLowerCase(),
+        entry,
+      ]),
+    );
+    let different = 0;
+    let onlyLocal = 0;
+    let onlyRemote = 0;
+    for (const [name, entry] of localByName) {
+      const other = remoteByName.get(name);
+      if (!other) onlyLocal += 1;
+      else if (
+        other.kind !== entry.kind ||
+        (entry.kind !== "dir" && other.size !== entry.size)
+      ) {
+        different += 1;
+      }
+    }
+    for (const name of remoteByName.keys()) {
+      if (!localByName.has(name)) onlyRemote += 1;
+    }
+    notice = `Сравнение каталогов: различаются ${different}, только локально ${onlyLocal}, только на сервере ${onlyRemote}`;
+  }
+
+  async function toggleSyncNavigation() {
+    if (!settings) return;
+    const next = !settings.panels.syncNavigation;
+    settings.panels = { ...settings.panels, syncNavigation: next };
+    try {
+      await api.saveSettings(settings);
+      notice = next
+        ? "Синхронная навигация включена"
+        : "Синхронная навигация выключена";
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   function openBookmarks() {
     if (!settings) return;
     bookmarksOpen = true;
@@ -835,10 +886,8 @@
       try {
         await api.uploadFromCache(sid, localPath, remotePath);
         logEdit("сохранён");
-        if (tab?.listing?.path === remotePath.replace(/\/[^/]+$/, "") || true) {
-          const dir = remotePath.replace(/\/[^/]+$/, "");
-          if (remote?.path === dir) await onRemotePath(tab!.id, dir);
-        }
+        const dir = remotePath.replace(/\/[^/]+$/, "");
+        if (tab && remote?.path === dir) await onRemotePath(tab.id, dir);
       } catch (e) {
         error = `Загрузка изменений: ${e}`;
       } finally {
@@ -1429,6 +1478,8 @@
     {canCompare}
     {canSync}
     {canExtract}
+    compareDirs={dirCompare}
+    syncNavigation={settings?.panels?.syncNavigation === true}
     {terminalOpen}
     {filter}
     onBack={onBack}
@@ -1438,6 +1489,8 @@
     onCompare={openCompare}
     onSync={openSync}
     onExtract={extractSelected}
+    onCompareDirs={toggleDirCompare}
+    onSyncNavigation={toggleSyncNavigation}
     onRename={renameSelected}
     onDelete={deleteSelected}
     onMkdir={mkdirPrompt}
@@ -1483,6 +1536,8 @@
       filter={focused === "remote" ? filter : ""}
       canAdd
       otherNames={comparePanels ? localNames : undefined}
+      otherEntries={localListing?.entries ?? []}
+      compareMode={dirCompare}
       onSelectTab={onSelectTab}
       onCloseTab={onCloseTab}
       onAdd={onAddTab}
