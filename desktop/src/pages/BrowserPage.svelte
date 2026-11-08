@@ -1065,48 +1065,41 @@
     });
   }
 
-  const highlighted = $derived.by(() => {
-    if (!editor || editor.mode === "edit") return "";
-    const name = editor.entry.name.toLowerCase();
-    const ext = name.includes(".") ? name.split(".").pop() ?? "" : "";
-    const language =
-      ext === "php"
-        ? "php"
-        : ext === "js" || ext === "mjs" || ext === "cjs"
-          ? "javascript"
-          : ext === "ts"
-            ? "typescript"
-            : ext === "json"
-              ? "json"
-              : ext === "html" || ext === "htm"
-                ? "xml"
-                : ext === "css"
-                  ? "css"
-                  : ext === "md"
-                    ? "markdown"
-                    : ext === "sh" || ext === "bash"
-                      ? "bash"
-                      : ext === "yml" || ext === "yaml"
-                        ? "yaml"
-                        : ext === "xml"
-                          ? "xml"
-                          : ext === "rs"
-                            ? "rust"
-                            : ext === "py"
-                              ? "python"
-                              : ext === "sql"
-                                ? "sql"
-                                : ext === "ini" || ext === "conf"
-                                  ? "ini"
-                                  : "";
-    const text = editor.text.slice(0, 200000);
+  function languageFor(name: string): string {
+    const lower = name.toLowerCase();
+    const ext = lower.includes(".") ? lower.split(".").pop() ?? "" : "";
+    if (ext === "php") return "php";
+    if (ext === "js" || ext === "mjs" || ext === "cjs") return "javascript";
+    if (ext === "ts") return "typescript";
+    if (ext === "json") return "json";
+    if (ext === "html" || ext === "htm") return "xml";
+    if (ext === "css") return "css";
+    if (ext === "md") return "markdown";
+    if (ext === "sh" || ext === "bash") return "bash";
+    if (ext === "yml" || ext === "yaml") return "yaml";
+    if (ext === "xml") return "xml";
+    if (ext === "rs") return "rust";
+    if (ext === "py") return "python";
+    if (ext === "sql") return "sql";
+    if (ext === "ini" || ext === "conf") return "ini";
+    return "";
+  }
+
+  function highlightCode(text: string, name: string): string {
+    if (text.length > 120000) return "";
+    const language = languageFor(name);
     try {
       return language
         ? hljs.highlight(text, { language, ignoreIllegals: true }).value
-        : hljs.highlightAuto(text).value;
+        : hljs.highlightAuto(text.slice(0, 60000)).value;
     } catch {
       return "";
     }
+  }
+
+  const highlighted = $derived.by(() => {
+    if (!editor || editor.mode === "edit") return "";
+    return highlightCode(editor.text.slice(0, 200000), editor.entry.name);
   });
 
   const editorTruncated = $derived((editor?.text.length ?? 0) >= 262140);
@@ -2314,6 +2307,11 @@
 
   .btn:hover {
     background: var(--hover);
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 
   .btn.primary {

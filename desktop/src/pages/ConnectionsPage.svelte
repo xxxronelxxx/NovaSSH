@@ -7,7 +7,6 @@
     FolderPlus,
     Grid2x2,
     History,
-    KeyRound,
     Lock,
     Pencil,
     Plus,
@@ -400,9 +399,6 @@
     >
       <History size={17} />
     </button>
-    <button class="top-btn" title="Ключи" disabled>
-      <KeyRound size={17} />
-    </button>
     <button class="top-btn" title="Настройки" onclick={onSettings}>
       <Settings2 size={17} />
     </button>
@@ -525,7 +521,13 @@
         </button>
       {/each}
       <div class="grow"></div>
-      <button class="new-group" disabled>
+      <button
+        class="new-group"
+        onclick={() => {
+          newGroupName = "";
+          groupPrompt = true;
+        }}
+      >
         <FolderPlus size={15} />
         Новая группа
       </button>
