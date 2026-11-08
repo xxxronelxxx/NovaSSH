@@ -111,6 +111,16 @@
       }
       return;
     }
+    // Windows keeps no master password: the DPAPI device key opens the vault.
+    const silent = await api.ensureDeviceVault().catch(() => false);
+    if (silent) {
+      locked = false;
+      await onBookChanged();
+      toast = "Хранилище разблокировано";
+      setTimeout(() => (toast = null), 2200);
+      return;
+    }
+    // Fallback for an old password-only profile.
     unlockPassword = "";
     unlockError = null;
     unlockOpen = true;
@@ -309,7 +319,7 @@
     const server = moveTarget;
     moveTarget = null;
     if (!server) return;
-    await moveServerToGroup(server.id, moveGroup || null);
+    await moveServerToGroup(server.id, await bulkTargetGroup());
   }
 
   async function deleteServer(server: Server) {
@@ -402,9 +412,32 @@
     await onBookChanged();
   }
 
+  async function ensureGroup(name: string): Promise<string> {
+    const existing = groups.find(
+      (item) => item.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (existing) return existing.id;
+    const saved = await api.saveGroup({
+      id: `g_${Date.now()}`,
+      name,
+      parent: null,
+      color: "#E5484D",
+      order: groups.length,
+      expanded: true,
+      icon: null,
+    });
+    await onBookChanged();
+    return saved.id;
+  }
+
+  async function bulkTargetGroup(): Promise<string | null> {
+    if (moveGroup === "__new__") return ensureGroup("Нерабочие");
+    return moveGroup || null;
+  }
+
   async function confirmBulkMove() {
     const ids = [...checked];
-    const target = moveGroup || null;
+    const target = await bulkTargetGroup();
     moveTarget = null;
     if (!ids.length) return;
     for (const id of ids) await moveServerToGroup(id, target);
@@ -846,6 +879,7 @@
       </div>
       <select bind:value={moveGroup}>
         <option value="">Без группы</option>
+        <option value="__new__">Новая группа «Нерабочие»</option>
         {#each groups as group (group.id)}
           <option value={group.id}>{group.name}</option>
         {/each}

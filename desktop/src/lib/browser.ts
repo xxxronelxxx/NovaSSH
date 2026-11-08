@@ -7,4 +7,5 @@ export interface BrowserTab {
   sessionId: string;
   listing: DirListing | null;
   disconnected?: boolean;
+  uname?: string;
 }

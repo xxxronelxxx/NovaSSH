@@ -1071,3 +1071,8 @@ pub async fn clear_server_tmp(server_name: String) -> Result<(), String> {
 pub async fn clear_all_tmp() -> Result<(), String> {
     blocking!(api::clear_all_tmp())
 }
+
+#[tauri::command]
+pub async fn exec_remote(session_id: String, command: String) -> Result<String, String> {
+    blocking!(api::exec_remote(session_id, command))
+}

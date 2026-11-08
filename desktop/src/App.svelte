@@ -76,6 +76,7 @@
       applyAppearance(settings?.appearance);
       void api.setSolidMode(settings?.window?.solidMode ?? false).catch(() => {});
 
+      void api.clearAllTmp().catch(() => {});
       volumes = await api.volumes().catch(() => []);
       const home = await api.homeLocal();
       await loadLocal(home);
@@ -180,6 +181,15 @@
     }
   }
 
+  async function loadUname(tabId: string, sessionId: string) {
+    const output =
+      (await api
+        .execRemote(sessionId, "uname -a")
+        .catch(() => "")) ?? "";
+    const tab = tabs.find((item) => item.id === tabId);
+    if (tab) tab.uname = output.trim();
+  }
+
   async function connect(
     server: Server,
     password: string | null = null,
@@ -202,6 +212,7 @@
     try {
       const result = await api.connectServer(server.id, password);
       const tabId = addTab(server, result.sessionId);
+      void loadUname(tabId, result.sessionId);
       if (restore) {
         if (restore.localPath) await loadLocal(restore.localPath);
         await loadRemote(
@@ -258,6 +269,7 @@
       const result = await api.connectServer(tab.server.id, null);
       tab.sessionId = result.sessionId;
       tab.disconnected = false;
+      void loadUname(id, result.sessionId);
       await loadRemote(id, tab.listing?.path || result.startPath);
     } catch (e) {
       const message = String(e);

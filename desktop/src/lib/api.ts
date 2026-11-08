@@ -612,6 +612,8 @@ export const api = {
   clearServerTmp: (serverName: string) =>
     invoke<void>("clear_server_tmp", { serverName }),
   clearAllTmp: () => invoke<void>("clear_all_tmp"),
+  execRemote: (sessionId: string, command: string) =>
+    invoke<string>("exec_remote", { sessionId, command }),
   appendEditLog: (
     server: string,
     serverName: string,

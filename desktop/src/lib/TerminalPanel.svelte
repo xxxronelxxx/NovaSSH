@@ -3,7 +3,7 @@
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import "@xterm/xterm/css/xterm.css";
-  import { ListChecks, Sparkles, X } from "lucide-svelte";
+  import { ListChecks, Save, Sparkles, X } from "lucide-svelte";
   import SnippetsDialog from "./SnippetsDialog.svelte";
   import AiDialog from "./AiDialog.svelte";
   import { api, type Snippet } from "../lib/api";
@@ -19,6 +19,7 @@
     serverHost = "",
     user = "",
     port = 22,
+    uname = "",
     onClose,
   }: {
     sessionId: string;
@@ -30,6 +31,7 @@
     serverHost?: string;
     user?: string;
     port?: number;
+    uname?: string;
     onClose: () => void;
   } = $props();
 
@@ -46,6 +48,12 @@
     value: string;
     resolve: (value: string | null) => void;
   } | null>(null);
+  let snippetDraft = $state<{
+    name: string;
+    command: string;
+    serverOnly: boolean;
+  } | null>(null);
+  let snippetError = $state<string | null>(null);
 
   onMount(async () => {
     if (!host) return;
@@ -151,6 +159,64 @@
     term?.focus();
   }
 
+  function selectionToSnippet() {
+    const text = term?.getSelection().trim() ?? "";
+    if (!text) {
+      error = "Выделите текст в терминале, чтобы сохранить его как сниппет";
+      return;
+    }
+    const first = text.split("\n")[0].trim();
+    snippetDraft = {
+      name: first.slice(0, 60) || "Команда из терминала",
+      command: text,
+      serverOnly: !!serverId,
+    };
+    snippetError = null;
+  }
+
+  async function saveSnippetDraft() {
+    const draft = snippetDraft;
+    if (!draft) return;
+    const name = draft.name.trim();
+    if (!name || !draft.command.trim()) {
+      snippetError = "Заполните имя";
+      return;
+    }
+    try {
+      const saved = await api.saveSnippet({
+        id: "",
+        name,
+        command: draft.command,
+        description: "Сохранено из терминала",
+        favorite: false,
+        runImmediately: false,
+        confirm: true,
+        scope: draft.serverOnly ? "server" : "global",
+        serverId: draft.serverOnly ? serverId : null,
+        order: 0,
+      });
+      if (saved.favorite) favorites = [...favorites, saved];
+      snippetDraft = null;
+      error = null;
+    } catch (e) {
+      snippetError = String(e);
+    }
+  }
+
+  async function useChip(snippet: Snippet, forceRun = false) {
+    if (snippet.runImmediately || forceRun) {
+      if (
+        snippet.confirm &&
+        !window.confirm(`Выполнить «${snippet.command}»?`)
+      ) {
+        return;
+      }
+      await writeCommand(snippet.command, true);
+    } else {
+      await writeCommand(snippet.command, false);
+    }
+  }
+
   function submitPrompt() {
     const current = prompt;
     if (!current) return;
@@ -182,6 +248,9 @@
   <header>
     <span class="title">Терминал · {title}</span>
     <span class="grow"></span>
+    <button title="Сохранить выделение как сниппет" onclick={selectionToSnippet}>
+      <Save size={14} />
+    </button>
     <button title="Сниппеты" onclick={() => (snippetsOpen = true)}>
       <ListChecks size={14} />
     </button>
@@ -196,9 +265,8 @@
         <button
           class="chip"
           title={snippet.description || snippet.command}
-          onclick={() => void writeCommand(snippet.command, false)}
-          ondblclick={() =>
-            void writeCommand(snippet.command, snippet.runImmediately)}
+          onclick={() => void useChip(snippet)}
+          ondblclick={() => void useChip(snippet, true)}
         >
           {snippet.name}
         </button>
@@ -211,6 +279,36 @@
     <div class="host" bind:this={host}></div>
   {/if}
 </section>
+
+{#if snippetDraft}
+  <div class="prompt-overlay" onclick={() => (snippetDraft = null)}>
+    <div class="prompt" onclick={(e) => e.stopPropagation()}>
+      <div class="prompt-title">Сниппет из терминала</div>
+      <input
+        bind:value={snippetDraft.name}
+        autofocus
+        placeholder="Имя сниппета"
+        onkeydown={(e) => e.key === "Enter" && saveSnippetDraft()}
+      />
+      <pre class="snippet-command">{snippetDraft.command}</pre>
+      {#if serverId}
+        <label class="snippet-scope">
+          <input type="checkbox" bind:checked={snippetDraft.serverOnly} />
+          Только для этого сервера
+        </label>
+      {/if}
+      {#if snippetError}<div class="snippet-error">{snippetError}</div>{/if}
+      <div class="prompt-foot">
+        <button class="pbtn" onclick={() => (snippetDraft = null)}>
+          Отмена
+        </button>
+        <button class="pbtn primary" onclick={saveSnippetDraft}>
+          Сохранить
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if prompt}
   <div class="prompt-overlay" onclick={() => (prompt = null)}>
@@ -350,6 +448,40 @@
     font-family: var(--mono);
     font-size: 12px;
     outline: none;
+  }
+
+  .snippet-command {
+    max-height: 120px;
+    margin: 8px 0 0;
+    padding: 8px 9px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    white-space: pre-wrap;
+    user-select: text;
+  }
+
+  .snippet-scope {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+
+  .snippet-scope input {
+    accent-color: var(--accent);
+  }
+
+  .snippet-error {
+    margin-top: 8px;
+    color: var(--error);
+    font-size: 11.5px;
   }
 
   .prompt input:focus {

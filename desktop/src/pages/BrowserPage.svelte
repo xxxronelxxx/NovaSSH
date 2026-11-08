@@ -7,6 +7,13 @@
   import BookmarksDialog from "../lib/BookmarksDialog.svelte";
   import TransferPromptDialog from "../lib/TransferPromptDialog.svelte";
   import hljs from "highlight.js/lib/common";
+  import dartLanguage from "highlight.js/lib/languages/dart";
+  import lessLanguage from "highlight.js/lib/languages/less";
+  import scssLanguage from "highlight.js/lib/languages/scss";
+
+  hljs.registerLanguage("dart", dartLanguage);
+  hljs.registerLanguage("less", lessLanguage);
+  hljs.registerLanguage("scss", scssLanguage);
   import PaneCard from "../lib/PaneCard.svelte";
   import Toolbar from "../lib/Toolbar.svelte";
   import TransferPanel from "../lib/TransferPanel.svelte";
@@ -491,7 +498,10 @@
 
   function openSelected() {
     const entry = selectedEntry;
-    if (!entry) return;
+    if (!entry) {
+      up();
+      return;
+    }
     if (entry.kind === "dir") {
       if (focused === "local") {
         if (archive) void loadArchive(entry.path);
@@ -1117,9 +1127,23 @@
       return;
     }
     await run("Читаю файл…", async () => {
-      const text = current
-        ? await api.previewArchive(current.path, entry.path, 262144, null)
-        : await api.preview(sid, entry.path, 262144);
+      let text: string;
+      if (current) {
+        const token = `read_${Date.now()}`;
+        task = { label: `Читаю ${entry.name}…`, token };
+        try {
+          text = await api.previewArchive(
+            current.path,
+            entry.path,
+            262144,
+            token,
+          );
+        } finally {
+          task = null;
+        }
+      } else {
+        text = await api.preview(sid, entry.path, 262144);
+      }
       if (mode === "edit" && !current && text.includes("\u0000")) {
         error = "Похоже на бинарный файл — редактирование недоступно";
         return;
@@ -1260,6 +1284,11 @@
     if (ext === "html" || ext === "htm") return "xml";
     if (ext === "css") return "css";
     if (ext === "md") return "markdown";
+    if (ext === "dart") return "dart";
+    if (ext === "scss" || ext === "sass") return "scss";
+    if (ext === "less") return "less";
+    if (ext === "svg") return "xml";
+    if (ext === "tsx" || ext === "jsx") return "javascript";
     if (ext === "sh" || ext === "bash") return "bash";
     if (ext === "yml" || ext === "yaml") return "yaml";
     if (ext === "xml") return "xml";

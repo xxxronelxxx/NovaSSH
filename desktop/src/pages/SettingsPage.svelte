@@ -31,6 +31,11 @@
   } = $props();
 
   let s = $state<Settings>(JSON.parse(JSON.stringify(settings)));
+  let baseline = $state<Settings>(JSON.parse(JSON.stringify(settings)));
+
+  $effect(() => {
+    baseline = JSON.parse(JSON.stringify(settings));
+  });
   let tab = $state<
     | "appearance"
     | "panels"
@@ -126,17 +131,24 @@
     }
   }
 
+  async function persistAi() {
+    if (!ai) return;
+    await api.saveAiSettings(ai);
+    const reference = `ai_key_${ai.provider}`;
+    const key = aiKey.trim();
+    if (key) await api.setSecret(reference, key);
+    else await api.deleteSecret(reference).catch(() => {});
+  }
+
   async function saveAi() {
     if (!ai) return;
     aiBusy = true;
     aiError = null;
     aiSaved = null;
     try {
-      await api.saveAiSettings(ai);
-      if (aiKey.trim()) {
-        await api.setSecret(`ai_key_${ai.provider}`, aiKey.trim());
-      }
+      await persistAi();
       aiSaved = "Сохранено";
+      setTimeout(() => (aiSaved = null), 1800);
     } catch (e) {
       aiError = String(e);
     } finally {
@@ -181,6 +193,9 @@
     error = null;
     try {
       await onSave(s);
+      await persistAi();
+      if (rules) await api.saveColorRules(rules);
+      rulesSaved = "Правила сохранены";
       toast = "Настройки сохранены";
       if (savedTimer) clearTimeout(savedTimer);
       savedTimer = setTimeout(() => {
@@ -192,6 +207,20 @@
     } finally {
       busy = false;
     }
+  }
+
+  function cancelSettings() {
+    const base = baseline;
+    setTheme(
+      base.window.theme === "light"
+        ? "light"
+        : base.window.theme === "system"
+          ? "system"
+          : "dark",
+    );
+    applyAppearance(base.appearance);
+    void api.setSolidMode(base.window.solidMode ?? false).catch(() => {});
+    onClose();
   }
 
   function handleKey(event: KeyboardEvent) {
@@ -213,7 +242,7 @@
       snippetsOpen = false;
     } else {
       event.preventDefault();
-      onClose();
+      cancelSettings();
     }
   }
 
@@ -270,9 +299,7 @@
 
   async function saveRules(next: ColorRules) {
     rules = next;
-    await api.saveColorRules(next);
-    rulesSaved = "Правила сохранены";
-    setTimeout(() => (rulesSaved = null), 1800);
+    rulesSaved = null;
   }
 
   function addRule() {
@@ -384,7 +411,7 @@
 <div class="settings">
   <div class="head">
     <span>Настройки</span>
-    <button class="icon" title="Закрыть" onclick={onClose}>
+    <button class="icon" title="Закрыть" onclick={cancelSettings}>
       <X size={16} />
     </button>
   </div>
@@ -863,7 +890,7 @@
       {#if toast}<div class="toast">{toast}</div>{/if}
 
       <div class="footer">
-        <button class="btn" onclick={onClose}>Отмена</button>
+        <button class="btn" onclick={cancelSettings}>Отмена</button>
         <button class="btn primary" disabled={busy} onclick={commit}>
           {busy ? "Сохраняю…" : "Сохранить"}
         </button>
