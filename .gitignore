@@ -42,3 +42,6 @@ Thumbs.db
 
 # badge-maker tooling
 /tools/badges/node_modules/
+
+# local UI preview screenshots
+.playwright-mcp/

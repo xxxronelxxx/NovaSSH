@@ -1,27 +1,80 @@
-:root {
-  --window: #0f1115;
+:root,
+:root[data-theme="dark"] {
+  --window: rgba(15, 17, 21, 0.86);
   --toolbar: rgba(21, 25, 34, 0.92);
-  --panel: #141820;
-  --menu: #181d26;
+  --panel: rgba(20, 24, 32, 0.95);
+  --menu: rgba(24, 29, 38, 0.97);
   --raised: #1b2029;
-  --border: rgba(255, 255, 255, 0.09);
-  --border-strong: rgba(255, 255, 255, 0.16);
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
   --text: #e8ecf3;
   --dim: #9aa4b2;
   --faint: #6b7480;
+  --inverse: #0b0d12;
   --accent: #4c8dff;
   --accent-hover: #6ba1ff;
-  --selection: rgba(76, 141, 255, 0.24);
-  --selection-inactive: rgba(255, 255, 255, 0.06);
-  --dir: #f0c04a;
-  --archive: #c08cff;
+  --accent-pressed: #3a73d9;
+  --hover: rgba(255, 255, 255, 0.05);
+  --selection: rgba(76, 141, 255, 0.22);
+  --selection-inactive: rgba(255, 255, 255, 0.08);
   --success: #3fb950;
   --warn: #d29922;
   --error: #f85149;
+  --dir: #7fb4ff;
+  --symlink: #56d4dd;
+  --archive: #c39bff;
+  --exec: #8be28b;
+  --panel-header: rgba(11, 13, 18, 0.3);
+  --panel-subtle: rgba(0, 0, 0, 0.2);
+  --warn-surface: #3a2a12;
+}
+
+:root[data-theme="light"] {
+  --window: rgba(244, 246, 250, 0.9);
+  --toolbar: rgba(238, 241, 246, 0.94);
+  --panel: rgba(255, 255, 255, 0.96);
+  --menu: rgba(255, 255, 255, 0.98);
+  --raised: #ffffff;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text: #141922;
+  --dim: #5a6473;
+  --faint: #8a93a2;
+  --inverse: #ffffff;
+  --accent: #2f6feb;
+  --accent-hover: #4a83f0;
+  --accent-pressed: #255bc4;
+  --hover: rgba(0, 0, 0, 0.04);
+  --selection: rgba(47, 111, 235, 0.18);
+  --selection-inactive: rgba(0, 0, 0, 0.06);
+  --success: #1f7a34;
+  --warn: #9a6b06;
+  --error: #c62828;
+  --dir: #1d5fd6;
+  --symlink: #0e8f9e;
+  --archive: #7b4fd1;
+  --exec: #1f7a34;
+  --panel-header: rgba(0, 0, 0, 0.06);
+  --panel-subtle: rgba(0, 0, 0, 0.04);
+  --warn-surface: #fff4e0;
+}
+
+:root {
+  --ui-system: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, sans-serif;
+  --mono-system: "Cascadia Mono", Consolas, "JetBrains Mono", monospace;
+  --ui: var(--ui-system);
+  --mono: var(--mono-system);
+  --row-font: 12.5px;
+  --row-height: 26px;
   --radius: 10px;
   --radius-sm: 6px;
-  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
-  --ui: "Segoe UI", Inter, system-ui, sans-serif;
+  --title-height: 36px;
+  --toolbar-height: 46px;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
 }
 
 * {
@@ -41,13 +94,14 @@ body {
   background: transparent;
   color: var(--text);
   font-family: var(--ui);
-  font-size: 13px;
+  font-size: 12.5px;
   -webkit-font-smoothing: antialiased;
   user-select: none;
 }
 
 button {
   font-family: inherit;
+  font-size: inherit;
   color: inherit;
   border: 0;
   background: none;
@@ -56,6 +110,7 @@ button {
 
 input {
   font-family: inherit;
+  font-size: inherit;
   color: inherit;
 }
 
@@ -65,13 +120,17 @@ input {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(128, 128, 128, 0.28);
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(128, 128, 128, 0.45);
   background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
 }

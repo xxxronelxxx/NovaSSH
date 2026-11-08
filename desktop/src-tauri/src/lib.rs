@@ -35,6 +35,18 @@ async fn ensure_device_vault() -> Result<bool, String> {
 }
 
 #[tauri::command]
+async fn load_settings() -> Result<nova_core::model::Settings, String> {
+    tauri::async_runtime::spawn_blocking(api::load_settings)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn volumes() -> Vec<nova_core::model::Volume> {
+    api::volumes()
+}
+
+#[tauri::command]
 async fn list_servers() -> Result<ServerBook, String> {
     tauri::async_runtime::spawn_blocking(api::load_book)
         .await
@@ -140,6 +152,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             init_app,
             ensure_device_vault,
+            load_settings,
+            volumes,
             list_servers,
             connect_server,
             cancel_connect,
