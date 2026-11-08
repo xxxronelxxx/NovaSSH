@@ -160,6 +160,17 @@
   let dirCompare = $state(false);
   let split = $state(false);
   let selecting = $state(false);
+  let localSort = $state<{ key: string; asc: boolean }>({
+    key: "name",
+    asc: true,
+  });
+  let remoteSorts = $state<Record<string, { key: string; asc: boolean }>>({});
+
+  function nextSort(current: { key: string; asc: boolean }, key: string) {
+    return current.key === key
+      ? { key, asc: !current.asc }
+      : { key, asc: key === "name" };
+  }
   let tabMenu = $state<{ x: number; y: number; id: string } | null>(null);
   let transferPrompt = $state<{
     direction: "upload" | "download";
@@ -1938,6 +1949,16 @@
             otherNames={comparePanels ? localNames : undefined}
             otherEntries={localListing?.entries ?? []}
             compareMode={dirCompare}
+            sortKey={(remoteSorts[item.id]?.key ?? "name") as "name" | "size" | "mode" | "modified"}
+            sortAsc={remoteSorts[item.id]?.asc ?? true}
+            onSort={(key) =>
+              (remoteSorts = {
+                ...remoteSorts,
+                [item.id]: nextSort(
+                  remoteSorts[item.id] ?? { key: "name", asc: true },
+                  key,
+                ),
+              })}
             onSelectTab={() => chooseTab(item.id)}
             onCloseTab={onCloseTab}
             onAdd={onAddTab}
@@ -1978,6 +1999,16 @@
         otherNames={comparePanels ? localNames : undefined}
         otherEntries={localListing?.entries ?? []}
         compareMode={dirCompare}
+        sortKey={(remoteSorts[activeTabId]?.key ?? "name") as "name" | "size" | "mode" | "modified"}
+        sortAsc={remoteSorts[activeTabId]?.asc ?? true}
+        onSort={(key) =>
+          (remoteSorts = {
+            ...remoteSorts,
+            [activeTabId]: nextSort(
+              remoteSorts[activeTabId] ?? { key: "name", asc: true },
+              key,
+            ),
+          })}
         onSelectTab={chooseTab}
         onCloseTab={onCloseTab}
         onReorderTab={onReorderTab}

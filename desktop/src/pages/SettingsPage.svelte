@@ -57,6 +57,7 @@
 
   let ai = $state<AiSettings | null>(null);
   let aiKey = $state("");
+  let aiKeyLoaded = $state(false);
   let aiModels = $state<AiModel[]>([]);
   let aiBusy = $state(false);
   let aiError = $state<string | null>(null);
@@ -64,6 +65,7 @@
 
   let rules = $state<ColorRules | null>(null);
   let rulesSaved = $state<string | null>(null);
+  let rulesTimer: ReturnType<typeof setTimeout> | null = null;
   let ruleDraft = $state<ColorRule | null>(null);
 
   let logSettings = $state<LogSettings | null>(null);
@@ -94,6 +96,7 @@
     try {
       ai = await api.loadAiSettings();
       aiKey = (await api.getSecret(`ai_key_${ai.provider}`)) ?? "";
+      aiKeyLoaded = true;
     } catch (e) {
       aiError = String(e);
     }
@@ -110,8 +113,10 @@
     aiModels = [];
     try {
       aiKey = (await api.getSecret(`ai_key_${provider}`)) ?? "";
+      aiKeyLoaded = true;
     } catch {
       aiKey = "";
+      aiKeyLoaded = false;
     }
   }
 
@@ -137,7 +142,7 @@
     const reference = `ai_key_${ai.provider}`;
     const key = aiKey.trim();
     if (key) await api.setSecret(reference, key);
-    else await api.deleteSecret(reference).catch(() => {});
+    else if (aiKeyLoaded) await api.deleteSecret(reference).catch(() => {});
   }
 
   async function saveAi() {
@@ -196,6 +201,11 @@
       await persistAi();
       if (rules) await api.saveColorRules(rules);
       rulesSaved = "Правила сохранены";
+      if (rulesTimer) clearTimeout(rulesTimer);
+      rulesTimer = setTimeout(() => {
+        rulesSaved = null;
+        rulesTimer = null;
+      }, 1800);
       toast = "Настройки сохранены";
       if (savedTimer) clearTimeout(savedTimer);
       savedTimer = setTimeout(() => {

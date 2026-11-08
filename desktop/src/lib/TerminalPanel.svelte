@@ -162,7 +162,7 @@
   function selectionToSnippet() {
     const text = term?.getSelection().trim() ?? "";
     if (!text) {
-      error = "Выделите текст в терминале, чтобы сохранить его как сниппет";
+      window.alert("Выделите текст в терминале, чтобы сохранить его как сниппет");
       return;
     }
     const first = text.split("\n")[0].trim();
@@ -197,7 +197,6 @@
       });
       if (saved.favorite) favorites = [...favorites, saved];
       snippetDraft = null;
-      error = null;
     } catch (e) {
       snippetError = String(e);
     }

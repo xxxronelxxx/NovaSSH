@@ -31,6 +31,9 @@
     otherNames,
     otherEntries,
     compareMode = false,
+    sortKey = null,
+    sortAsc = true,
+    onSort = null,
     onSelectTab,
     onCloseTab,
     onReorderTab,
@@ -57,6 +60,9 @@
     otherNames?: Set<string>;
     otherEntries?: Entry[];
     compareMode?: boolean;
+    sortKey?: "name" | "size" | "mode" | "modified" | null;
+    sortAsc?: boolean;
+    onSort?: ((key: "name" | "size" | "mode" | "modified") => void) | null;
     onSelectTab: (id: string) => void;
     onCloseTab?: (id: string) => void;
     onReorderTab?: (fromId: string, toId: string) => void;
@@ -74,8 +80,11 @@
 
   let anchor = $state<string | null>(null);
   let rules = $state<ColorRule[]>([]);
-  let sortKey = $state<"name" | "size" | "mode" | "modified">("name");
-  let sortAsc = $state(true);
+  type SortKey = "name" | "size" | "mode" | "modified";
+  let internalSortKey = $state<SortKey>("name");
+  let internalSortAsc = $state(true);
+  const activeSortKey = $derived(sortKey ?? internalSortKey);
+  const activeSortAsc = $derived(sortKey ? sortAsc : internalSortAsc);
   let dragOver = $state(false);
   let editingPath = $state(false);
   let pathDraft = $state("");
@@ -185,7 +194,7 @@
   }
 
   function sortValue(entry: Entry): string | number {
-    switch (sortKey) {
+    switch (activeSortKey) {
       case "size":
         return entry.size;
       case "mode":
@@ -197,16 +206,20 @@
     }
   }
 
-  function toggleSort(key: "name" | "size" | "mode" | "modified") {
-    if (sortKey === key) sortAsc = !sortAsc;
+  function toggleSort(key: SortKey) {
+    if (onSort) {
+      onSort(key);
+      return;
+    }
+    if (internalSortKey === key) internalSortAsc = !internalSortAsc;
     else {
-      sortKey = key;
-      sortAsc = key === "name";
+      internalSortKey = key;
+      internalSortAsc = key === "name";
     }
   }
 
   const sortMark = $derived((key: string) =>
-    sortKey === key ? (sortAsc ? " ↑" : " ↓") : "",
+    activeSortKey === key ? (activeSortAsc ? " ↑" : " ↓") : "",
   );
 
   const lowerFilter = $derived(filter.trim().toLowerCase());
@@ -223,7 +236,7 @@
           : String(left).localeCompare(String(right), "ru", {
               sensitivity: "base",
             });
-      return sortAsc ? result : -result;
+      return activeSortAsc ? result : -result;
     });
     if (!lowerFilter) return list;
     return list.filter((entry) =>

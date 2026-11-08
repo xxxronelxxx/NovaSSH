@@ -915,12 +915,12 @@
 {#if unlockOpen}
   <div class="overlay" onclick={() => (unlockOpen = false)}>
     <div class="group-dialog" onclick={(e) => e.stopPropagation()}>
-      <div class="group-title">Разблокировать хранилище</div>
+      <div class="group-title">Старый пароль профиля</div>
       <input
         type="password"
         bind:value={unlockPassword}
         autofocus
-        placeholder="Мастер-пароль"
+        placeholder="Пароль старого профиля"
         onkeydown={(e) => e.key === "Enter" && submitUnlock()}
       />
       {#if unlockError}<div class="import-errors">{unlockError}</div>{/if}
