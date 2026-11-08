@@ -135,6 +135,7 @@
   let bookmarksOpen = $state(false);
   let dirCompare = $state(false);
   let split = $state(false);
+  let tabMenu = $state<{ x: number; y: number; id: string } | null>(null);
   let transferPrompt = $state<{
     direction: "upload" | "download";
     items: Entry[];
@@ -764,6 +765,22 @@
     }
   }
 
+  function openTabMenu(id: string, event: MouseEvent) {
+    tabMenu = {
+      x: Math.min(event.clientX, window.innerWidth - 230),
+      y: Math.min(event.clientY, window.innerHeight - 160),
+      id,
+    };
+  }
+
+  function showOnlyTab(id: string) {
+    for (const item of [...tabs]) {
+      if (item.id !== id) onCloseTab(item.id);
+    }
+    onSelectTab(id);
+    tabMenu = null;
+  }
+
   function toggleSplit() {
     if (tabs.length < 2) return;
     split = !split;
@@ -808,7 +825,7 @@
   }
 
   function bulkRename() {
-    if (archive) {
+    if (archive && focused === "local") {
       error = "Внутри архива переименование недоступно";
       return;
     }
@@ -878,7 +895,7 @@
 
   function mkdirPrompt() {
     if (!listing) return;
-    if (archive) {
+    if (archive && focused === "local") {
       error = "В архиве нельзя создавать папки";
       return;
     }
@@ -893,7 +910,7 @@
   function renameSelected() {
     const entry = selectedEntry;
     if (!entry || !listing) return;
-    if (archive) {
+    if (archive && focused === "local") {
       error = "В архиве переименование недоступно";
       return;
     }
@@ -908,7 +925,7 @@
   function deleteSelected() {
     const items = selectedEntries;
     if (!items.length) return;
-    if (archive) {
+    if (archive && focused === "local") {
       error = "Из архива можно только распаковать";
       return;
     }
@@ -1136,7 +1153,7 @@
   function checksumSelected() {
     const entry = selectedEntry;
     if (!entry || entry.kind === "dir") return;
-    if (archive) {
+    if (archive && focused === "local") {
       error = "SHA-256 для файлов внутри архива пока не считается";
       return;
     }
@@ -1152,7 +1169,7 @@
   function chmodSelected() {
     const entry = selectedEntry;
     if (!entry) return;
-    if (archive) {
+    if (archive && focused === "local") {
       error = "В архиве права не меняются";
       return;
     }
@@ -1233,7 +1250,7 @@
   }
 
   function openFind() {
-    if (archive) {
+    if (archive && focused === "local") {
       error = "Поиск внутри архива пока не поддерживается";
       return;
     }
@@ -1670,6 +1687,7 @@
         onSelectTab={chooseTab}
         onCloseTab={onCloseTab}
         onReorderTab={onReorderTab}
+        onTabMenu={openTabMenu}
         onAdd={onAddTab}
         onUp={() => remote?.parent && navigateRemote(remote.parent)}
         onRefresh={() => remote && navigateRemote(remote.path)}
@@ -1717,6 +1735,28 @@
     </div>
   {/if}
 </div>
+
+{#if tabMenu}
+  <div class="menu-backdrop" onclick={() => (tabMenu = null)}></div>
+  <div
+    class="context"
+    style:left={`${tabMenu.x}px`}
+    style:top={`${tabMenu.y}px`}
+  >
+    <button onclick={() => showOnlyTab(tabMenu!.id)}>
+      Показать только этот сервер
+    </button>
+    <button
+      onclick={() => {
+        const id = tabMenu!.id;
+        tabMenu = null;
+        onCloseTab(id);
+      }}
+    >
+      Закрыть вкладку
+    </button>
+  </div>
+{/if}
 
 {#if menu}
   <div class="menu-backdrop" onclick={() => (menu = null)}></div>

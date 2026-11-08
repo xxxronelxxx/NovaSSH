@@ -123,9 +123,15 @@
     }
   }
 
-  onMount(() => {
-    // Quiet background check for servers that were never probed or are stale.
-    const stale = (book?.servers ?? []).filter(
+  let autoProbed = false;
+
+  $effect(() => {
+    // Quiet background check once the book is loaded: servers that were never
+    // probed or whose result is older than 30 minutes.
+    const servers = book?.servers ?? [];
+    if (autoProbed || !servers.length) return;
+    autoProbed = true;
+    const stale = servers.filter(
       (server) =>
         server.reachable == null ||
         !server.checkedAt ||
@@ -136,6 +142,7 @@
 
   async function probeServers(list: Server[], quiet = false) {
     if (probe || !list.length) return;
+    const startedAt = Date.now();
     probe = { done: 0, total: list.length };
     for (const server of list) reachable[server.id] = null;
     let index = 0;
@@ -153,6 +160,11 @@
       }
     };
     await Promise.all(Array.from({ length: Math.min(6, list.length) }, worker));
+    // Keep the bar on screen long enough to be noticed on a fast LAN.
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < 500) {
+      await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
+    }
     probe = null;
     if (!quiet) await onBookChanged();
   }
@@ -402,6 +414,20 @@
       {#if locked}<Unlock size={17} />{:else}<Lock size={17} />{/if}
     </button>
   </div>
+
+  {#if probe}
+    <div class="probe-wrap">
+      <div class="probe-bar">
+        <div
+          class="probe-fill"
+          style:width={`${Math.round((probe.done / Math.max(1, probe.total)) * 100)}%`}
+        ></div>
+      </div>
+      <span class="probe-label">
+        Проверка серверов: {probe.done} из {probe.total}
+      </span>
+    </div>
+  {/if}
 
   {#if restore.length}
     <div class="restore">
@@ -1073,6 +1099,34 @@
   .icon-wrap {
     display: grid;
     place-items: center;
+  }
+
+  .probe-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 0 2px;
+  }
+
+  .probe-bar {
+    flex: 1;
+    height: 5px;
+    overflow: hidden;
+    border-radius: 3px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+  }
+
+  .probe-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.18s linear;
+  }
+
+  .probe-label {
+    color: var(--faint);
+    font-size: 10.5px;
+    font-variant-numeric: tabular-nums;
   }
 
   .spin {

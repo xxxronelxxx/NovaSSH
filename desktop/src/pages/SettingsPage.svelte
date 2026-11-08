@@ -158,6 +158,12 @@
     ["about", "О программе"],
   ] as const;
 
+  const terminalProfile = $derived(
+    s.terminal.profiles.find(
+      (profile) => profile.id === s.terminal.defaultProfile,
+    ) ?? null,
+  );
+
   const uiFonts = ["", "Segoe UI", "Tahoma", "Verdana", "Arial", "Inter", "Roboto"];
   const monoFonts = ["", "JetBrains Mono", "Consolas", "Cascadia Mono", "Courier New", "Roboto Mono"];
   const textColors = ["", "#E8ECF3", "#FFFFFF", "#C9D1DB", "#F0C04A", "#8BE28B", "#6CB6FF", "#C08CFF", "#F07A9B"];
@@ -167,15 +173,47 @@
     applyAppearance(s.appearance);
   }
 
+  let savedTimer: ReturnType<typeof setTimeout> | null = null;
+  let editorCheck = $state<string | null>(null);
+
   async function commit() {
     busy = true;
     error = null;
     try {
       await onSave(s);
+      toast = "Настройки сохранены";
+      if (savedTimer) clearTimeout(savedTimer);
+      savedTimer = setTimeout(() => {
+        toast = null;
+        savedTimer = null;
+      }, 1800);
     } catch (e) {
       error = String(e);
     } finally {
       busy = false;
+    }
+  }
+
+  function handleKey(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    if (ruleDraft) {
+      event.preventDefault();
+      ruleDraft = null;
+    } else if (importPrompt) {
+      event.preventDefault();
+      importPrompt = false;
+    } else if (profileText) {
+      event.preventDefault();
+      profileText = null;
+    } else if (logsOpen) {
+      event.preventDefault();
+      logsOpen = false;
+    } else if (snippetsOpen) {
+      event.preventDefault();
+      snippetsOpen = false;
+    } else {
+      event.preventDefault();
+      onClose();
     }
   }
 
@@ -266,6 +304,27 @@
     await api.saveLogSettings(logSettings).catch(() => {});
   }
 
+  async function pickEditor() {
+    const path = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Программы", extensions: ["exe"] }],
+    });
+    if (!path || Array.isArray(path)) return;
+    s.editor.external = path;
+    editorCheck = null;
+  }
+
+  async function checkEditor() {
+    const value = s.editor.external.trim();
+    if (!value) {
+      editorCheck = "будет использован встроенный";
+      return;
+    }
+    const exists = await api.pathExists(value).catch(() => false);
+    editorCheck = exists ? "файл найден" : "файл не найден";
+  }
+
   async function pickWinscp() {
     const path = await open({
       multiple: false,
@@ -301,6 +360,8 @@
     await api.exportCredentials(path);
   }
 </script>
+
+<svelte:window onkeydown={handleKey} />
 
 <div class="settings">
   <div class="head">
@@ -340,6 +401,10 @@
               >Системная</button>
             </div>
           </div>
+          <label class="check">
+            <input type="checkbox" bind:checked={s.window.solidMode} />
+            Сплошной фон — отключает Mica/прозрачность (слабые GPU и RDP)
+          </label>
         </section>
         <section class="card">
           <div class="card-title">Иконки</div>
@@ -456,18 +521,38 @@
       {:else if tab === "editor"}
         <section class="card">
           <div class="card-title">Редактор</div>
-          <div class="row"><div class="label">Внешний редактор<small>Пусто — встроенный</small></div><input class="path" bind:value={s.editor.external} placeholder="C:\Program Files\...\editor.exe" /></div>
+          <div class="row">
+            <div class="label">Внешний редактор<small>Пусто — встроенный · F3 просмотр, F4 правка</small></div>
+            <input class="path" bind:value={s.editor.external} placeholder="C:\Program Files\...\editor.exe" />
+            <button class="btn" onclick={pickEditor}>Обзор…</button>
+            <button class="btn" onclick={() => { s.editor.external = ""; editorCheck = null; }}>Встроенный</button>
+            <button class="btn" onclick={checkEditor}>Проверить</button>
+          </div>
+          {#if editorCheck}
+            <p class="note {editorCheck === "файл не найден" ? "bad" : ""}">{editorCheck}</p>
+          {/if}
           <label class="check"><input type="checkbox" bind:checked={s.editor.fallbackBuiltin} /> Использовать встроенный, если внешний не задан</label>
         </section>
         <section class="card">
           <div class="card-title">Терминал</div>
-          <div class="row"><div class="label">Профиль по умолчанию</div>
+          <div class="row"><div class="label">Открывать по умолчанию<small>F4 / кнопка «Терминал»</small></div>
             <select bind:value={s.terminal.defaultProfile}>
+              <option value="">Встроенный терминал</option>
               {#each s.terminal.profiles as profile (profile.id)}
                 <option value={profile.id}>{profile.name}</option>
               {/each}
             </select>
           </div>
+          {#if terminalProfile}
+            <div class="row">
+              <div class="label">Программа терминала<small>Имя из PATH или полный путь; пусто — встроенный</small></div>
+              <input class="path" bind:value={terminalProfile.command} placeholder="wt.exe" />
+            </div>
+            <p class="note">Аргументы: {terminalProfile.args.join(" ") || "—"}</p>
+          {:else}
+            <p class="note">Встроенный терминал — вкладка с оболочкой внутри программы.</p>
+          {/if}
+          <p class="note">Профили: {s.terminal.profiles.map((profile) => profile.name).join(", ") || "нет"}</p>
           <label class="check"><input type="checkbox" bind:checked={s.terminal.builtinXterm} /> Встроенный терминал</label>
         </section>
         <section class="card">
@@ -1025,6 +1110,10 @@
     font-size: 11.5px;
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
     z-index: 130;
+  }
+
+  .note.bad {
+    color: var(--error);
   }
 
   .ok-text {

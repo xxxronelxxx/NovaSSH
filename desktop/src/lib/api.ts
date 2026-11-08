@@ -607,6 +607,11 @@ export const api = {
     invoke<void>("upload_from_cache", { sessionId, localPath, remotePath }),
   fileMtimeMs: (path: string) => invoke<number>("file_mtime_ms", { path }),
   uiLog: (line: string) => invoke<void>("ui_log", { line }),
+  setSolidMode: (solid: boolean) =>
+    invoke<void>("set_solid_mode", { solid }),
+  clearServerTmp: (serverName: string) =>
+    invoke<void>("clear_server_tmp", { serverName }),
+  clearAllTmp: () => invoke<void>("clear_all_tmp"),
   appendEditLog: (
     server: string,
     serverName: string,

@@ -74,6 +74,7 @@
         theme === "light" ? "light" : theme === "system" ? "system" : "dark",
       );
       applyAppearance(settings?.appearance);
+      void api.setSolidMode(settings?.window?.solidMode ?? false).catch(() => {});
 
       volumes = await api.volumes().catch(() => []);
       const home = await api.homeLocal();
@@ -165,6 +166,13 @@
         })),
       )
       .catch(() => {});
+    // Remember each server's last folder so reopening a tab returns there.
+    for (const tab of tabs) {
+      if (!tab.listing?.path) continue;
+      await api
+        .rememberSession(tab.server.id, tab.listing.path, localPath)
+        .catch(() => {});
+    }
   }
 
   async function connect(
@@ -262,11 +270,23 @@
 
   async function closeTab(id: string) {
     const tab = tabs.find((item) => item.id === id);
-    if (tab) await api.disconnect(tab.sessionId).catch(() => {});
+    if (tab) {
+      await api
+        .rememberSession(
+          tab.server.id,
+          tab.listing?.path ?? "",
+          local?.path ?? "",
+        )
+        .catch(() => {});
+      await api.disconnect(tab.sessionId).catch(() => {});
+    }
     tabs = tabs.filter((item) => item.id !== id);
     if (activeTabId === id) {
       activeTabId = tabs[0]?.id ?? "";
       if (!tabs.length) showConnections = true;
+    }
+    if (!tabs.some((item) => item.server.id === tab?.server.id)) {
+      void api.clearServerTmp(tab?.label ?? "").catch(() => {});
     }
     await persistSessions();
   }
@@ -442,6 +462,16 @@
     const index = transfers.findIndex((item) => item.id === event.id);
     if (index >= 0) transfers[index] = event;
     else transfers = [event, ...transfers];
+    if (
+      event.state === "done" ||
+      event.state === "failed" ||
+      event.state === "cancelled"
+    ) {
+      const id = event.id;
+      setTimeout(() => {
+        transfers = transfers.filter((item) => item.id !== id);
+      }, 3000);
+    }
   }
 
   async function cancelTransfer(id: string) {
@@ -459,8 +489,7 @@
       theme === "light" ? "light" : theme === "system" ? "system" : "dark",
     );
     applyAppearance(settings?.appearance);
-    showSettings = false;
-    notice = "Настройки сохранены";
+    void api.setSolidMode(settings?.window?.solidMode ?? false).catch(() => {});
     if (local) await loadLocal(local.path);
     if (tabs.length) {
       const tab = tabs.find((item) => item.id === activeTabId);

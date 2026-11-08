@@ -34,7 +34,9 @@
     onSelectTab,
     onCloseTab,
     onReorderTab,
+    onTabMenu,
     onContextMenu,
+    onDrop,
     onAdd,
     onUp,
     onRefresh,
@@ -58,6 +60,7 @@
     onSelectTab: (id: string) => void;
     onCloseTab?: (id: string) => void;
     onReorderTab?: (fromId: string, toId: string) => void;
+    onTabMenu?: (id: string, event: MouseEvent) => void;
     onContextMenu?: (entry: Entry | null, event: MouseEvent) => void;
     onAdd: () => void;
     onUp: () => void;
@@ -74,6 +77,26 @@
   let sortKey = $state<"name" | "size" | "mode" | "modified">("name");
   let sortAsc = $state(true);
   let dragOver = $state(false);
+  let editingPath = $state(false);
+  let pathDraft = $state("");
+  let root: HTMLElement | undefined = $state();
+  let pointerDrag = $state<{
+    x: number;
+    y: number;
+    paths: string[];
+  } | null>(null);
+
+  function beginPathEdit() {
+    if (!listing) return;
+    pathDraft = listing.path;
+    editingPath = true;
+  }
+
+  function commitPath() {
+    const next = pathDraft.trim();
+    editingPath = false;
+    if (next && next !== listing?.path) onPath(next);
+  }
 
   const selectedSet = $derived(new Set(selected));
 
@@ -207,6 +230,46 @@
     }
   }
 
+  function startPointerDrag(entry: Entry, event: PointerEvent) {
+    if (event.button !== 0) return;
+    pointerDrag = {
+      x: event.clientX,
+      y: event.clientY,
+      paths: selectedSet.has(entry.path) ? [...selected] : [entry.path],
+    };
+  }
+
+  function pointerMove(event: PointerEvent) {
+    const start = pointerDrag;
+    if (!start) return;
+    if (Math.abs(event.clientX - start.x) < 6 && Math.abs(event.clientY - start.y) < 6) {
+      return;
+    }
+    (window as any).__novaDrag = { source: variant, paths: start.paths };
+  }
+
+  function pointerUp(event: PointerEvent) {
+    const start = pointerDrag;
+    pointerDrag = null;
+    const payload = (window as any).__novaDrag as
+      | { source: "local" | "remote"; paths: string[] }
+      | undefined;
+    if (!payload) return;
+    const element = document.elementFromPoint(event.clientX, event.clientY);
+    const inside = !!root && !!element && root.contains(element);
+    if (inside && payload.source !== variant) {
+      onDrop?.(payload.source, payload.paths);
+      delete (window as any).__novaDrag;
+    } else {
+      // Clear leftovers so a later click inside a pane does not re-drop.
+      setTimeout(() => {
+        if ((window as any).__novaDrag === payload) {
+          delete (window as any).__novaDrag;
+        }
+      }, 0);
+    }
+  }
+
   function startDrag(entry: Entry, event: DragEvent) {
     const paths = selectedSet.has(entry.path) ? [...selected] : [entry.path];
     event.dataTransfer?.setData(
@@ -275,11 +338,14 @@
   );
 </script>
 
+<svelte:window onpointermove={pointerMove} onpointerup={pointerUp} onpointercancel={pointerUp} />
+
 <section
   class="pane"
   class:focused
   class:drag-over={dragOver}
   data-pane={variant}
+  bind:this={root}
   onpointerdown={onFocus}
 >
   <div class="tabs">
@@ -291,6 +357,12 @@
         class="tab"
         class:active={tab.id === activeTab}
         title={tab.hint ?? tab.label}
+        oncontextmenu={(event) => {
+          if (onTabMenu) {
+            event.preventDefault();
+            onTabMenu(tab.id, event);
+          }
+        }}
         draggable="true"
         ondragstart={(event) => {
           event.dataTransfer?.setData("application/x-nova-tab", tab.id);
@@ -334,13 +406,45 @@
     {/if}
   </div>
 
-  <div class="crumbs">
-    {#each crumbs as crumb, index (crumb.value)}
-      {#if index > 0}<span class="slash">›</span>{/if}
-      <button class="crumb" onclick={() => onPath(crumb.value)}>
-        {crumb.label}
+  <div
+    class="crumbs"
+    title="Двойной клик — изменить путь"
+    ondblclick={beginPathEdit}
+  >
+    {#if editingPath}
+      <input
+        class="path-input"
+        bind:value={pathDraft}
+        autofocus
+        spellcheck="false"
+        onfocus={(event) => event.currentTarget.select()}
+        onkeydown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            commitPath();
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            editingPath = false;
+          }
+        }}
+        onblur={commitPath}
+      />
+      <button
+        class="path-ok"
+        title="Перейти"
+        onmousedown={(event) => event.preventDefault()}
+        onclick={commitPath}
+      >
+        →
       </button>
-    {/each}
+    {:else}
+      {#each crumbs as crumb, index (crumb.value)}
+        {#if index > 0}<span class="slash">›</span>{/if}
+        <button class="crumb" onclick={() => onPath(crumb.value)}>
+          {crumb.label}
+        </button>
+      {/each}
+    {/if}
   </div>
 
   <div class="head">
@@ -390,10 +494,12 @@
         class:selected={selectedSet.has(entry.path)}
         class:only-here={(compareMode || otherNames) && compareState(entry) === "only"}
         class:different={compareState(entry) === "different"}
-        draggable="true"
-        ondragstart={(event) => startDrag(entry, event)}
+        draggable="false"
         onpointerdown={(event) => {
-          if (event.button === 0) handleSelect(entry, event);
+          if (event.button === 0) {
+            handleSelect(entry, event);
+            startPointerDrag(entry, event);
+          }
         }}
         ondblclick={() => onOpen(entry)}
         oncontextmenu={(event) => {
@@ -561,6 +667,34 @@
   .slash {
     color: var(--faint);
     font-size: 11px;
+  }
+
+  .path-input {
+    flex: 1;
+    min-width: 0;
+    height: 24px;
+    padding: 0 7px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    background: var(--panel);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    outline: none;
+  }
+
+  .path-ok {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 4px;
+    color: var(--accent);
+    font-size: 13px;
+  }
+
+  .path-ok:hover {
+    background: var(--hover);
   }
 
   .crumb {

@@ -1048,3 +1048,26 @@ pub async fn append_edit_log(
 pub fn ui_log(line: String) {
     api::append_log(line);
 }
+
+#[tauri::command]
+pub async fn set_solid_mode(window: tauri::WebviewWindow, solid: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        if solid {
+            let _ = window_vibrancy::clear_mica(&window);
+        } else {
+            let _ = window_vibrancy::apply_mica(&window, Some(true));
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_server_tmp(server_name: String) -> Result<(), String> {
+    blocking!(api::clear_server_tmp(server_name))
+}
+
+#[tauri::command]
+pub async fn clear_all_tmp() -> Result<(), String> {
+    blocking!(api::clear_all_tmp())
+}
