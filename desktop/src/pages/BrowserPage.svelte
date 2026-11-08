@@ -460,19 +460,27 @@
     await run(`Распаковываю ${entry.name}…`, async () => {
       const channel = new Channel<TransferEvent>();
       let target = "";
+      task = { label: `Распаковываю ${entry.name}…`, token: null };
       channel.onmessage = (event) => {
         onTrackTransfer(event);
+        if (event.state === "running") {
+          task = { label: `Распаковываю ${entry.name}…`, token: event.id };
+        }
         if (event.state === "done" && event.message) target = event.message;
         if (event.message && !target) target = event.message;
       };
-      await api.unpackServerArchive(
-        tab!.sessionId,
-        entry.path,
-        "",
-        "",
-        null,
-        channel,
-      );
+      try {
+        await api.unpackServerArchive(
+          tab!.sessionId,
+          entry.path,
+          "",
+          "",
+          null,
+          channel,
+        );
+      } finally {
+        task = null;
+      }
       if (target) {
         await onRemotePath(tab!.id, target);
         notice = `Архив развёрнут на сервере: ${target}`;
@@ -1257,7 +1265,10 @@
   }
 
   function cancelTask() {
-    if (task?.token) void api.cancelArchiveTask(task.token).catch(() => {});
+    const token = task?.token;
+    if (!token) return;
+    void api.cancelArchiveTask(token).catch(() => {});
+    void api.cancelArchiveJob(token).catch(() => {});
   }
 
   async function toggleTerminal() {
@@ -1566,6 +1577,12 @@
       <TerminalPanel
         sessionId={tab.sessionId}
         title={tab.label}
+        context={[
+          `хост: ${tab.server.host}:${tab.server.port}`,
+          `пользователь: ${tab.server.user}`,
+          `подключение: ${tab.label}`,
+          `текущий каталог: ${remote?.path ?? ""}`,
+        ].join("\n")}
         onClose={() => (terminalOpen = false)}
       />
     </div>

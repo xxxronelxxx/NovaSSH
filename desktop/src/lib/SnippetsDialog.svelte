@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import {
+    ChevronDown,
+    ChevronUp,
     CornerDownLeft,
     Pencil,
     Play,
@@ -116,6 +118,19 @@
     }
   }
 
+  async function move(snippet: Snippet, delta: number) {
+    const list = [...snippets].sort((a, b) => a.order - b.order);
+    const index = list.findIndex((item) => item.id === snippet.id);
+    const target = index + delta;
+    if (index < 0 || target < 0 || target >= list.length) return;
+    const [moved] = list.splice(index, 1);
+    list.splice(target, 0, moved);
+    snippets = list.map((item, position) => ({ ...item, order: position }));
+    await api.saveSnippetOrder(snippets.map((item) => item.id)).catch(
+      (e) => (error = String(e)),
+    );
+  }
+
   function use(snippet: Snippet, run: boolean) {
     if (run) {
       if (snippet.confirm && !confirm(`Выполнить «${snippet.command}»?`)) return;
@@ -192,6 +207,12 @@
             </button>
             <button class="act" title="Выполнить" onclick={() => use(snippet, true)}>
               <Play size={13} />
+            </button>
+            <button class="act" title="Выше" onclick={() => move(snippet, -1)}>
+              <ChevronUp size={13} />
+            </button>
+            <button class="act" title="Ниже" onclick={() => move(snippet, 1)}>
+              <ChevronDown size={13} />
             </button>
             <button class="act" title="Изменить" onclick={() => startEdit(snippet)}>
               <Pencil size={13} />

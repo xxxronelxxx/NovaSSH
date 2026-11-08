@@ -7,10 +7,12 @@
     onClose,
     onInsert,
     onRun,
+    context = "",
   }: {
     onClose: () => void;
     onInsert: (command: string) => void;
     onRun: (command: string) => void;
+    context?: string;
   } = $props();
 
   let question = $state("");
@@ -53,7 +55,7 @@
         key,
         settings.model,
         question,
-        "",
+        settings.includeContext === false ? "" : context,
       );
     } catch (e) {
       error = String(e);

@@ -12,10 +12,12 @@
   let {
     sessionId,
     title,
+    context = "",
     onClose,
   }: {
     sessionId: string;
     title: string;
+    context?: string;
     onClose: () => void;
   } = $props();
 
@@ -60,6 +62,19 @@
       shellId = await api.openShell(sessionId, t.cols, t.rows);
       t.onData((data) => {
         if (shellId) api.shellWrite(shellId, data).catch(() => {});
+      });
+      t.attachCustomKeyEventHandler((event) => {
+        if (!event.ctrlKey || !event.shiftKey) return true;
+        const key = event.key.toLowerCase();
+        if (key === "p") {
+          snippetsOpen = true;
+          return false;
+        }
+        if (key === "a") {
+          aiOpen = true;
+          return false;
+        }
+        return true;
       });
       t.focus();
 
@@ -156,6 +171,7 @@
     onClose={() => (aiOpen = false)}
     onInsert={(command) => writeCommand(command, false)}
     onRun={(command) => writeCommand(command, true)}
+    {context}
   />
 {/if}
 

@@ -69,6 +69,13 @@
   let locked = $state(false);
   let dragGroup = $state<string | null>(null);
   let dragServer = $state<string | null>(null);
+  let serverMenu = $state<{
+    x: number;
+    y: number;
+    server: Server;
+  } | null>(null);
+  let moveTarget = $state<Server | null>(null);
+  let moveGroup = $state("");
   let unlockOpen = $state(false);
   let unlockPassword = $state("");
   let unlockError = $state<string | null>(null);
@@ -233,6 +240,67 @@
       );
     });
   });
+
+  function openServerMenu(server: Server, event: MouseEvent) {
+    event.preventDefault();
+    serverMenu = {
+      x: Math.min(event.clientX, window.innerWidth - 230),
+      y: Math.min(event.clientY, window.innerHeight - 230),
+      server,
+    };
+  }
+
+  async function duplicateServer(server: Server) {
+    const stamp = Date.now();
+    const id = `s_${stamp}`;
+    const copy: Server = {
+      ...server,
+      id,
+      name: `${server.name || server.host} (копия)`,
+      passwordRef: server.passwordRef ? `pwd_${id}` : null,
+      auth: {
+        ...server.auth,
+        passphraseRef: server.auth?.passphraseRef ? `pass_${id}` : null,
+      },
+      s3AccessRef: server.s3AccessRef ? `s3a_${id}` : null,
+      s3SecretRef: server.s3SecretRef ? `s3s_${id}` : null,
+      lastConnected: null,
+      reachable: null,
+      checkedAt: null,
+      authFailed: false,
+    };
+    try {
+      const saved = await api.saveServer(copy);
+      const transfers: [string | null | undefined, string | null | undefined][] =
+        [
+          [server.passwordRef, saved.passwordRef],
+          [server.auth?.passphraseRef, saved.auth?.passphraseRef],
+          [server.s3AccessRef, saved.s3AccessRef],
+          [server.s3SecretRef, saved.s3SecretRef],
+        ];
+      for (const [from, to] of transfers) {
+        if (!from || !to) continue;
+        const value = await api.getSecret(from).catch(() => null);
+        if (value) await api.setSecret(to, value);
+      }
+      await onBookChanged();
+    } catch (e) {
+      importError = String(e);
+    }
+  }
+
+  async function confirmMove() {
+    const server = moveTarget;
+    moveTarget = null;
+    if (!server) return;
+    await moveServerToGroup(server.id, moveGroup || null);
+  }
+
+  async function deleteServer(server: Server) {
+    if (!confirm(`Удалить «${server.name || server.host}»?`)) return;
+    await api.deleteServer(server.id);
+    await onBookChanged();
+  }
 
   async function moveServerToGroup(serverId: string, groupId: string | null) {
     const server = servers.find((item) => item.id === serverId);
@@ -470,6 +538,7 @@
             ondragstart={() => (dragServer = server.id)}
             ondragend={() => (dragServer = null)}
             onpointerdown={() => (selected = server.id)}
+            oncontextmenu={(event) => openServerMenu(server, event)}
             ondblclick={() => connect(server)}
             onkeydown={(e) => e.key === "Enter" && connect(server)}
           >
@@ -527,6 +596,91 @@
       await onBookChanged();
     }}
   />
+{/if}
+
+{#if serverMenu}
+  <div class="menu-backdrop" onclick={() => (serverMenu = null)}></div>
+  <div
+    class="context"
+    style:left={`${serverMenu.x}px`}
+    style:top={`${serverMenu.y}px`}
+  >
+    <button
+      onclick={() => {
+        const server = serverMenu!.server;
+        serverMenu = null;
+        connect(server);
+      }}
+    >
+      Подключиться
+    </button>
+    <button
+      onclick={() => {
+        const server = serverMenu!.server;
+        serverMenu = null;
+        editing = server;
+      }}
+    >
+      Изменить
+    </button>
+    <button
+      onclick={() => {
+        const server = serverMenu!.server;
+        serverMenu = null;
+        moveTarget = server;
+        moveGroup = server.groupId ?? "";
+      }}
+    >
+      Переместить в группу…
+    </button>
+    <button
+      onclick={() => {
+        const server = serverMenu!.server;
+        serverMenu = null;
+        void duplicateServer(server);
+      }}
+    >
+      Дублировать
+    </button>
+    <button
+      onclick={() => {
+        const server = serverMenu!.server;
+        serverMenu = null;
+        void probeServers([server]);
+      }}
+    >
+      Проверить доступ
+    </button>
+    <div class="sep"></div>
+    <button
+      class="danger"
+      onclick={() => {
+        const server = serverMenu!.server;
+        serverMenu = null;
+        void deleteServer(server);
+      }}
+    >
+      Удалить
+    </button>
+  </div>
+{/if}
+
+{#if moveTarget}
+  <div class="overlay" onclick={() => (moveTarget = null)}>
+    <div class="group-dialog" onclick={(e) => e.stopPropagation()}>
+      <div class="group-title">Переместить «{moveTarget.name || moveTarget.host}»</div>
+      <select bind:value={moveGroup}>
+        <option value="">Без группы</option>
+        {#each groups as group (group.id)}
+          <option value={group.id}>{group.name}</option>
+        {/each}
+      </select>
+      <div class="group-foot">
+        <button class="gbtn" onclick={() => (moveTarget = null)}>Отмена</button>
+        <button class="gbtn primary" onclick={confirmMove}>Переместить</button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if unlockOpen}
@@ -1069,6 +1223,59 @@
 
   .group-dialog input:focus {
     border-color: var(--accent);
+  }
+
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+  }
+
+  .context {
+    position: fixed;
+    z-index: 110;
+    width: 220px;
+    padding: 5px;
+    background: var(--menu);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    box-shadow: 0 15px 40px rgba(0, 0, 0, 0.5);
+  }
+
+  .context button {
+    display: block;
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 5px;
+    color: var(--text);
+    text-align: left;
+    font-size: 12px;
+  }
+
+  .context button:hover {
+    background: var(--selection);
+  }
+
+  .context .danger {
+    color: var(--error);
+  }
+
+  .context .sep {
+    height: 1px;
+    margin: 4px 6px;
+    background: var(--border);
+  }
+
+  .group-dialog select {
+    width: 100%;
+    height: 32px;
+    margin-bottom: 8px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 12.5px;
   }
 
   .group-dialog.import {
