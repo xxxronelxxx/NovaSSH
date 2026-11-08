@@ -267,12 +267,16 @@
 
   const localEntry = $derived(
     (localListing?.entries ?? []).find(
-      (entry) => entry.path === localSel[localSel.length - 1],
+      (entry) =>
+        entry.path ===
+        (localCursor ?? localSel[localSel.length - 1]),
     ) ?? null,
   );
   const remoteEntry = $derived(
     (remote?.entries ?? []).find(
-      (entry) => entry.path === remoteSel[remoteSel.length - 1],
+      (entry) =>
+        entry.path ===
+        (remoteCursor ?? remoteSel[remoteSel.length - 1]),
     ) ?? null,
   );
   const comparePair = $derived.by((): { left: FileRef; right: FileRef } | null => {
