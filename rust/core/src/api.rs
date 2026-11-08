@@ -4605,13 +4605,21 @@ pub fn check_server_access(server_id: String) -> Result<String, String> {
         ..Default::default()
     };
 
+    // The TCP connect has its own timeout, but a server can accept the socket
+    // and then stall during auth/SFTP. Cap the whole probe so the UI never
+    // spins forever on one bad host.
     let outcome = rt().block_on(async move {
-        match ssh::connect(&opts).await {
-            Ok(session) => {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            ssh::connect(&opts),
+        )
+        .await
+        {
+            Ok(Ok(session)) => {
                 let _ = session.close().await;
                 "ok"
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let text = e.to_string().to_lowercase();
                 if text.contains("auth")
                     || text.contains("permission denied")
@@ -4622,6 +4630,7 @@ pub fn check_server_access(server_id: String) -> Result<String, String> {
                     "unreachable"
                 }
             }
+            Err(_) => "unreachable",
         }
     });
 

@@ -66,6 +66,7 @@
 
   let reachable = $state<Record<string, boolean | null>>({});
   let probe = $state<{ done: number; total: number } | null>(null);
+  let probeGen = 0;
   let importReport = $state<WinscpImportReport | null>(null);
   let importError = $state<string | null>(null);
   let importBusy = $state(false);
@@ -156,31 +157,50 @@
     if (stale.length) void probeServers(stale, true);
   });
 
+  async function probeOne(serverId: string): Promise<boolean> {
+    try {
+      const state = await Promise.race([
+        api.checkServerAccess(serverId),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve("unreachable"), 20000),
+        ),
+      ]);
+      return state !== "unreachable";
+    } catch {
+      return false;
+    }
+  }
+
+  function cancelProbe() {
+    probeGen += 1;
+    probe = null;
+  }
+
   async function probeServers(list: Server[], quiet = false) {
     if (probe || !list.length) return;
+    const generation = ++probeGen;
     const startedAt = Date.now();
     probe = { done: 0, total: list.length };
     for (const server of list) reachable[server.id] = null;
     let index = 0;
     const worker = async () => {
       while (index < list.length) {
+        if (generation !== probeGen) return;
         const server = list[index++];
-        let up: boolean | null = null;
-        try {
-          up = (await api.checkServerAccess(server.id)) !== "unreachable";
-        } catch {
-          up = false;
-        }
+        const up = await probeOne(server.id);
+        if (generation !== probeGen) return;
         reachable[server.id] = up;
         if (probe) probe.done += 1;
       }
     };
     await Promise.all(Array.from({ length: Math.min(6, list.length) }, worker));
+    if (generation !== probeGen) return;
     // Keep the bar on screen long enough to be noticed on a fast LAN.
     const elapsed = Date.now() - startedAt;
     if (elapsed < 500) {
       await new Promise((resolve) => setTimeout(resolve, 500 - elapsed));
     }
+    if (generation !== probeGen) return;
     probe = null;
     if (!quiet) await onBookChanged();
   }
@@ -472,9 +492,8 @@
     </button>
     <button
       class="top-btn"
-      title="Проверить доступность всех серверов"
-      disabled={!!probe}
-      onclick={probeAll}
+      title={probe ? "Остановить проверку" : "Проверить доступность всех серверов"}
+      onclick={() => (probe ? cancelProbe() : probeAll())}
     >
       <span class="icon-wrap" class:spin={!!probe}>
         <RefreshCw size={17} />
@@ -514,6 +533,7 @@
       <span class="probe-label">
         Проверка серверов: {probe.done} из {probe.total}
       </span>
+      <button class="probe-cancel" onclick={cancelProbe}>Отмена</button>
     </div>
   {/if}
 
@@ -1391,6 +1411,20 @@
     color: var(--faint);
     font-size: 10.5px;
     font-variant-numeric: tabular-nums;
+  }
+
+  .probe-cancel {
+    padding: 2px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--raised);
+    color: var(--dim);
+    font-size: 10.5px;
+  }
+
+  .probe-cancel:hover {
+    background: var(--hover);
+    color: var(--text);
   }
 
   .spin {
