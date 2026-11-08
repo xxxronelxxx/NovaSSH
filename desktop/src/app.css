@@ -1,0 +1,77 @@
+:root {
+  --window: #0f1115;
+  --toolbar: rgba(21, 25, 34, 0.92);
+  --panel: #141820;
+  --menu: #181d26;
+  --raised: #1b2029;
+  --border: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --text: #e8ecf3;
+  --dim: #9aa4b2;
+  --faint: #6b7480;
+  --accent: #4c8dff;
+  --accent-hover: #6ba1ff;
+  --selection: rgba(76, 141, 255, 0.24);
+  --selection-inactive: rgba(255, 255, 255, 0.06);
+  --dir: #f0c04a;
+  --archive: #c08cff;
+  --success: #3fb950;
+  --warn: #d29922;
+  --error: #f85149;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  --ui: "Segoe UI", Inter, system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: transparent;
+  color: var(--text);
+  font-family: var(--ui);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+button {
+  font-family: inherit;
+  color: inherit;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+input {
+  font-family: inherit;
+  color: inherit;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+  background-clip: content-box;
+}

@@ -1,0 +1,27 @@
+[package]
+name = "nova-desktop"
+version = "0.6.0"
+edition = "2021"
+rust-version = "1.90"
+description = "NovaSSH desktop (Tauri 2 + Svelte)"
+license = "MIT"
+
+# The Flutter app lives in app/; keep this crate out of the root workspace so
+# `cargo test -p nova_core` does not build the whole desktop stack.
+[workspace]
+
+[lib]
+name = "nova_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nova_core = { path = "../../rust/core" }
+
+[target."cfg(windows)".dependencies]
+window-vibrancy = "0.6"

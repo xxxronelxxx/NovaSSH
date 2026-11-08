@@ -127,7 +127,8 @@ fn map_book(book: &ServerBook) -> ServerBook {
     book.clone()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AppInfo {
     pub data_dir: String,
     pub key_wrap: String,
@@ -872,7 +873,8 @@ async fn wait_for_cancel() {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConnectResult {
     pub session_id: String,
     pub start_path: String,
@@ -1273,6 +1275,7 @@ pub fn remove(session_id: Option<String>, path: String, is_dir: bool) -> Result<
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+/// File transfer used by Flutter/Android. Desktop calls [`transfer_with`].
 pub fn transfer(
     session_id: String,
     direction: String,
@@ -1285,6 +1288,68 @@ pub fn transfer(
     target_name: Option<String>,
     sink: StreamSink<TransferEvent>,
 ) -> Result<(), String> {
+    transfer_impl(
+        session_id,
+        direction,
+        source_path,
+        target_dir,
+        resume_from,
+        limit_kibps,
+        verify,
+        target_name,
+        move |event| {
+            let _ = sink.add(event);
+        },
+    )
+}
+
+/// Same as [`transfer`] but takes a callback instead of a FRB stream sink.
+/// Tauri feeds a `Channel<TransferEvent>` from here.
+#[frb(ignore)]
+pub fn transfer_with<F>(
+    session_id: String,
+    direction: String,
+    source_path: String,
+    target_dir: String,
+    resume_from: u64,
+    limit_kibps: u32,
+    verify: bool,
+    // Optional new name for the copied file (rename on copy).
+    target_name: Option<String>,
+    emit: F,
+) -> Result<(), String>
+where
+    F: Fn(TransferEvent) + Send + Sync + 'static,
+{
+    transfer_impl(
+        session_id,
+        direction,
+        source_path,
+        target_dir,
+        resume_from,
+        limit_kibps,
+        verify,
+        target_name,
+        emit,
+    )
+}
+
+fn transfer_impl<F>(
+    session_id: String,
+    direction: String,
+    source_path: String,
+    target_dir: String,
+    resume_from: u64,
+    limit_kibps: u32,
+    verify: bool,
+    // Optional new name for the copied file (rename on copy).
+    target_name: Option<String>,
+    emit: F,
+) -> Result<(), String>
+where
+    F: Fn(TransferEvent) + Send + Sync + 'static,
+{
+    let emit = std::sync::Arc::new(emit);
     let a = app()?;
     let remote = provider_remote(a, &session_id)?;
     let local = Provider::local();
@@ -1314,7 +1379,7 @@ pub fn transfer(
         .map(|e| e.size)
         .unwrap_or(0);
 
-    let _ = sink.add(TransferEvent {
+    let _ = emit(TransferEvent {
         id: id.clone(),
         name: name.clone(),
         total,
@@ -1355,7 +1420,7 @@ pub fn transfer(
         let permit = match slots.acquire_owned().await {
             Ok(permit) => permit,
             Err(_) => {
-                let _ = sink.add(TransferEvent {
+                let _ = emit(TransferEvent {
                     id: event_id.clone(),
                     name: name.clone(),
                     total,
@@ -1366,7 +1431,7 @@ pub fn transfer(
                 return;
             }
         };
-        let _ = sink.add(TransferEvent {
+        let _ = emit(TransferEvent {
             id: event_id.clone(),
             name: name.clone(),
             total,
@@ -1381,7 +1446,7 @@ pub fn transfer(
             let mut reader = match src.open_read(&src_path, 0).await {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = sink.add(TransferEvent {
+                    let _ = emit(TransferEvent {
                         id,
                         name,
                         total,
@@ -1394,7 +1459,7 @@ pub fn transfer(
             };
             let mut data = Vec::new();
             if let Err(e) = reader.read_to_end(&mut data).await {
-                let _ = sink.add(TransferEvent {
+                let _ = emit(TransferEvent {
                     id,
                     name,
                     total,
@@ -1408,7 +1473,7 @@ pub fn transfer(
                 Ok(()) => (TransferState::Done, None),
                 Err(e) => (TransferState::Failed, Some(e.to_string())),
             };
-            let _ = sink.add(TransferEvent {
+            let _ = emit(TransferEvent {
                 id,
                 name,
                 total: data.len() as u64,
@@ -1423,7 +1488,7 @@ pub fn transfer(
             let mut reader = match src.open_read(&src_path, 0).await {
                 Ok(r) => r,
                 Err(e) => {
-                    let _ = sink.add(TransferEvent {
+                    let _ = emit(TransferEvent {
                         id,
                         name,
                         total,
@@ -1436,7 +1501,7 @@ pub fn transfer(
             };
             let mut data = Vec::new();
             if let Err(e) = reader.read_to_end(&mut data).await {
-                let _ = sink.add(TransferEvent {
+                let _ = emit(TransferEvent {
                     id,
                     name,
                     total,
@@ -1450,7 +1515,7 @@ pub fn transfer(
                 Ok(()) => (TransferState::Done, None),
                 Err(e) => (TransferState::Failed, Some(e.to_string())),
             };
-            let _ = sink.add(TransferEvent {
+            let _ = emit(TransferEvent {
                 id,
                 name,
                 total: data.len() as u64,
@@ -1463,7 +1528,7 @@ pub fn transfer(
 
         let mut stats = CopyStats::default();
         let mut last_emit = 0u64;
-        let sink2 = sink.clone();
+        let emit2 = emit.clone();
         let limit_bps = if limit_kibps == 0 {
             None
         } else {
@@ -1480,7 +1545,7 @@ pub fn transfer(
                 // Throttle to ~1 MiB to keep the UI bridge quiet.
                 if done - last_emit >= 1024 * 1024 || done == total {
                     last_emit = done;
-                    let _ = sink2.add(TransferEvent {
+                    let _ = emit2(TransferEvent {
                         id: event_id.clone(),
                         name: name.clone(),
                         total,
@@ -1540,7 +1605,7 @@ pub fn transfer(
                 None => note,
             });
         }
-        let _ = sink.add(TransferEvent {
+        let _ = emit(TransferEvent {
             id,
             name,
             total,
