@@ -16,11 +16,16 @@
     dirLabel: string;
     allowRename: boolean;
     onClose: () => void;
-    onConfirm: (result: { dir: string; name: string | null }) => void;
+    onConfirm: (result: {
+      dir: string;
+      name: string | null;
+      background: boolean;
+    }) => void;
   } = $props();
 
   let dir = $state(initialDir);
   let name = $state(items.length === 1 ? items[0] : "");
+  let background = $state(false);
   let error = $state<string | null>(null);
 
   function submit() {
@@ -34,7 +39,11 @@
       error = "Имя не должно содержать разделитель пути";
       return;
     }
-    onConfirm({ dir: target, name: rename && rename !== items[0] ? rename : null });
+    onConfirm({
+      dir: target,
+      name: rename && rename !== items[0] ? rename : null,
+      background,
+    });
   }
 </script>
 
@@ -59,6 +68,11 @@
     {:else}
       <div class="note">Файлов: {items.length}. Имена сохранятся.</div>
     {/if}
+
+    <label class="check">
+      <input type="checkbox" bind:checked={background} />
+      В фоне — без окна прогресса (задачи останутся в панели передач)
+    </label>
 
     {#if error}<div class="error">{error}</div>{/if}
 
@@ -150,6 +164,19 @@
   .note {
     color: var(--faint);
     font-size: 11.5px;
+  }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 2px;
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+
+  .check input {
+    accent-color: var(--accent);
   }
 
   .foot {

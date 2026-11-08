@@ -94,24 +94,31 @@
     book = await api.listServers();
   }
 
-  async function loadLocal(path: string) {
+  async function loadLocal(path: string, showHidden?: boolean) {
     if (!path.trim()) return;
     try {
-      local = await api.listLocal(path, settings?.panels?.showHidden ?? true);
+      local = await api.listLocal(
+        path,
+        showHidden ?? settings?.panels?.showHidden ?? true,
+      );
       schedulePersist();
     } catch (e) {
       error = `Локально: ${e}`;
     }
   }
 
-  async function loadRemote(tabId: string, path: string) {
+  async function loadRemote(
+    tabId: string,
+    path: string,
+    showHidden?: boolean,
+  ) {
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab || !path.trim()) return;
     try {
       tab.listing = await api.listRemote(
         tab.sessionId,
         path,
-        settings?.panels?.showHidden ?? true,
+        showHidden ?? settings?.panels?.showHidden ?? true,
       );
       tab.disconnected = false;
       schedulePersist();
@@ -308,10 +315,14 @@
     sourcePath: string;
     targetDir: string;
     targetName: string | null;
+    background: boolean;
   }
 
   let queue: TransferJob[] = [];
   let activeTransfers = 0;
+  let conflictAll: "overwrite" | "skip" | null = null;
+  let foregroundIds = new Set<string>();
+  let foreground = $state<{ total: number; done: number } | null>(null);
   let conflict = $state<{
     name: string;
     resolve: (choice: "overwrite" | "skip" | "cancel") => void;
@@ -328,11 +339,34 @@
     });
   }
 
-  function resolveConflict(choice: "overwrite" | "skip" | "cancel") {
+  function resolveConflict(
+    choice: "overwrite" | "skip" | "cancel",
+    applyAll = false,
+  ) {
     const current = conflict;
     if (!current) return;
+    if (applyAll && (choice === "overwrite" || choice === "skip")) {
+      conflictAll = choice;
+    }
     conflict = null;
     current.resolve(choice);
+  }
+
+  function cancelForeground() {
+    for (const id of foregroundIds) {
+      void api.cancelTransfer(id).catch(() => {});
+    }
+    const remaining: TransferJob[] = [];
+    for (const job of queue) {
+      if (foregroundIds.has(job.id)) {
+        foregroundIds.delete(job.id);
+        if (foreground) foreground.done += 1;
+      } else {
+        remaining.push(job);
+      }
+    }
+    queue = remaining;
+    if (foreground && foreground.done >= foreground.total) foreground = null;
   }
 
   function transfer(
@@ -340,18 +374,45 @@
     sourcePath: string,
     targetDir: string,
     targetName: string | null = null,
+    background = false,
   ) {
     const tab = tabs.find((item) => item.id === activeTabId);
     if (!tab) return;
+    const id = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    if (!background) {
+      if (!foreground) foreground = { total: 0, done: 0 };
+      foreground.total += 1;
+      foregroundIds.add(id);
+    }
     queue.push({
-      id: `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      id,
       tabId: tab.id,
       sessionId: tab.sessionId,
       direction,
       sourcePath,
       targetDir,
       targetName,
+      background,
     });
+    void pumpTransfers();
+  }
+
+  function finishJob(job: TransferJob) {
+    activeTransfers -= 1;
+    if (foregroundIds.has(job.id)) {
+      foregroundIds.delete(job.id);
+      if (foreground) {
+        foreground.done += 1;
+        if (foreground.done >= foreground.total) {
+          setTimeout(() => {
+            if (foreground && foreground.done >= foreground.total) {
+              foreground = null;
+            }
+          }, 700);
+        }
+      }
+    }
+    if (activeTransfers === 0 && queue.length === 0) conflictAll = null;
     void pumpTransfers();
   }
 
@@ -361,10 +422,7 @@
       const job = queue.shift();
       if (!job) break;
       activeTransfers += 1;
-      void runTransfer(job).finally(() => {
-        activeTransfers -= 1;
-        void pumpTransfers();
-      });
+      void runTransfer(job).finally(() => finishJob(job));
     }
   }
 
@@ -396,12 +454,13 @@
     let resumeFrom = 0;
     let targetName: string | null = job.targetName;
     if (exists != null && !targetName) {
-      const policy = settings?.transfer.conflictPolicy ?? "ask";
+      const policy = conflictAll ?? settings?.transfer.conflictPolicy ?? "ask";
       if (policy === "skip") return;
       if (policy === "ask") {
         const choice = await askConflict(name);
-        if (choice === "skip") return;
-        if (choice === "cancel") return;
+        const applied = conflictAll ?? choice;
+        if (applied === "skip") return;
+        if (applied === "cancel") return;
       }
       if (policy === "rename") {
         const dot = name.lastIndexOf(".");
@@ -543,6 +602,13 @@
       {transfers}
       onSelectTab={(id) => (activeTabId = id)}
       onCloseTab={closeTab}
+      onSwapTabs={(fromId, toId) => {
+        const from = tabs.findIndex((tab) => tab.id === fromId);
+        const to = tabs.findIndex((tab) => tab.id === toId);
+        if (from < 0 || to < 0 || from === to) return;
+        [tabs[from], tabs[to]] = [tabs[to], tabs[from]];
+        tabs = [...tabs];
+      }}
       onReorderTab={(fromId, toId) => {
         const from = tabs.findIndex((tab) => tab.id === fromId);
         const to = tabs.findIndex((tab) => tab.id === toId);
@@ -566,6 +632,26 @@
     />
   {/if}
 
+  {#if foreground}
+    <div class="overlay">
+      <div class="dialog">
+        <div class="dialog-title">Передача файлов</div>
+        <div class="foreground-line">
+          Выполнено {foreground.done} из {foreground.total}
+        </div>
+        <div class="foreground-bar">
+          <div
+            class="foreground-fill"
+            style:width={`${Math.round((foreground.done / Math.max(1, foreground.total)) * 100)}%`}
+          ></div>
+        </div>
+        <div class="dialog-foot">
+          <button class="btn" onclick={cancelForeground}>Отмена всех</button>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   {#if conflict}
     <div class="overlay">
       <div class="dialog">
@@ -577,6 +663,12 @@
           </button>
           <button class="btn" onclick={() => resolveConflict("skip")}>
             Пропустить
+          </button>
+          <button class="btn" onclick={() => resolveConflict("skip", true)}>
+            Пропустить все
+          </button>
+          <button class="btn" onclick={() => resolveConflict("overwrite", true)}>
+            Перезаписать все
           </button>
           <button class="btn primary" onclick={() => resolveConflict("overwrite")}>
             Перезаписать
@@ -745,6 +837,26 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  .foreground-line {
+    margin-bottom: 8px;
+    color: var(--dim);
+    font-size: 12px;
+  }
+
+  .foreground-bar {
+    height: 6px;
+    overflow: hidden;
+    border-radius: 3px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+  }
+
+  .foreground-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.18s linear;
   }
 
   .conflict-name {

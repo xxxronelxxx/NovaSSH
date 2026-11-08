@@ -14,12 +14,22 @@
     serverId = null,
     title,
     context = "",
+    path = "",
+    file = "",
+    serverHost = "",
+    user = "",
+    port = 22,
     onClose,
   }: {
     sessionId: string;
     serverId?: string | null;
     title: string;
     context?: string;
+    path?: string;
+    file?: string;
+    serverHost?: string;
+    user?: string;
+    port?: number;
     onClose: () => void;
   } = $props();
 
@@ -31,6 +41,11 @@
   let snippetsOpen = $state(false);
   let aiOpen = $state(false);
   let favorites = $state<Snippet[]>([]);
+  let prompt = $state<{
+    label: string;
+    value: string;
+    resolve: (value: string | null) => void;
+  } | null>(null);
 
   onMount(async () => {
     if (!host) return;
@@ -106,10 +121,41 @@
     term?.dispose();
   });
 
-  function writeCommand(command: string, run: boolean) {
+  async function expand(command: string): Promise<string | null> {
+    let text = command
+      .replaceAll("{path}", path)
+      .replaceAll("{file}", file)
+      .replaceAll("{host}", serverHost)
+      .replaceAll("{user}", user)
+      .replaceAll("{port}", String(port))
+      .replaceAll("{server}", title);
+    const pattern = /\{prompt:([^}]*)\}/;
+    while (true) {
+      const match = pattern.exec(text);
+      if (!match) break;
+      const label = match[1].trim() || "Значение";
+      const answer = await new Promise<string | null>((resolve) => {
+        prompt = { label, value: "", resolve };
+      });
+      if (answer == null) return null;
+      text = text.slice(0, match.index) + answer + text.slice(match.index + match[0].length);
+    }
+    return text;
+  }
+
+  async function writeCommand(command: string, run: boolean) {
     if (!shellId) return;
-    api.shellWrite(shellId, run ? `${command}\r` : command).catch(() => {});
+    const text = await expand(command);
+    if (text == null) return;
+    api.shellWrite(shellId, run ? `${text}\r` : text).catch(() => {});
     term?.focus();
+  }
+
+  function submitPrompt() {
+    const current = prompt;
+    if (!current) return;
+    prompt = null;
+    current.resolve(current.value);
   }
 
   function toggleTheme() {
@@ -150,9 +196,9 @@
         <button
           class="chip"
           title={snippet.description || snippet.command}
-          onclick={() => writeCommand(snippet.command, false)}
+          onclick={() => void writeCommand(snippet.command, false)}
           ondblclick={() =>
-            writeCommand(snippet.command, snippet.runImmediately)}
+            void writeCommand(snippet.command, snippet.runImmediately)}
         >
           {snippet.name}
         </button>
@@ -165,6 +211,26 @@
     <div class="host" bind:this={host}></div>
   {/if}
 </section>
+
+{#if prompt}
+  <div class="prompt-overlay" onclick={() => (prompt = null)}>
+    <div class="prompt" onclick={(e) => e.stopPropagation()}>
+      <div class="prompt-title">{prompt.label}</div>
+      <input
+        bind:value={prompt.value}
+        autofocus
+        onkeydown={(e) => {
+          if (e.key === "Enter") submitPrompt();
+          if (e.key === "Escape") prompt = null;
+        }}
+      />
+      <div class="prompt-foot">
+        <button class="pbtn" onclick={() => (prompt = null)}>Отмена</button>
+        <button class="pbtn primary" onclick={submitPrompt}>OK</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 {#if snippetsOpen}
   <SnippetsDialog
@@ -247,6 +313,70 @@
     background: var(--raised);
     color: var(--dim);
     font-size: 11px;
+  }
+
+  .prompt-overlay {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(0, 0, 0, 0.45);
+    z-index: 130;
+  }
+
+  .prompt {
+    width: 360px;
+    padding: 14px 16px 12px;
+    background: var(--menu);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  }
+
+  .prompt-title {
+    margin-bottom: 8px;
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+
+  .prompt input {
+    width: 100%;
+    height: 32px;
+    padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    outline: none;
+  }
+
+  .prompt input:focus {
+    border-color: var(--accent);
+  }
+
+  .prompt-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .pbtn {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    color: var(--text);
+    font-size: 12px;
+  }
+
+  .pbtn.primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: #fff;
+    font-weight: 600;
   }
 
   .chip:hover {

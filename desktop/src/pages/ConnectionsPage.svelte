@@ -13,6 +13,7 @@
     RefreshCw,
     Search,
     Settings2,
+    Trash2,
     Unlock,
     X,
   } from "lucide-svelte";
@@ -56,8 +57,11 @@
   let protocol = $state<Protocol>("all");
   let selected = $state<string | null>(null);
   let editing = $state<Server | "new" | null>(null);
-  let newGroupName = $state("");
-  let groupPrompt = $state(false);
+  let groupEditor = $state<{ id: string | null; name: string } | null>(null);
+  let groupMenu = $state<{ x: number; y: number; group: Group | null } | null>(
+    null,
+  );
+  let checked = $state<Set<string>>(new Set());
   let settingsBusy = $state(false);
 
   let reachable = $state<Record<string, boolean | null>>({});
@@ -74,6 +78,7 @@
     server: Server;
   } | null>(null);
   let moveTarget = $state<Server | null>(null);
+  let bulkMoveOpen = $state(false);
   let moveGroup = $state("");
   let unlockOpen = $state(false);
   let unlockPassword = $state("");
@@ -338,20 +343,72 @@
     await onBookChanged();
   }
 
-  async function addGroup() {
-    const name = newGroupName.trim();
+  async function saveGroupEdit() {
+    const editor = groupEditor;
+    if (!editor) return;
+    const name = editor.name.trim();
     if (!name) return;
-    groupPrompt = false;
+    groupEditor = null;
+    const existing = editor.id
+      ? groups.find((item) => item.id === editor.id)
+      : null;
     await api.saveGroup({
-      id: `g_${Date.now()}`,
+      id: editor.id ?? `g_${Date.now()}`,
       name,
-      parent: null,
-      color: null,
-      order: groups.length,
-      expanded: true,
-      icon: null,
+      parent: existing?.parent ?? null,
+      color: existing?.color ?? null,
+      order: existing?.order ?? groups.length,
+      expanded: existing?.expanded ?? true,
+      icon: existing?.icon ?? null,
     });
     await onBookChanged();
+  }
+
+  async function deleteGroup(item: Group) {
+    if (!confirm(`Удалить группу «${item.name}»? Серверы останутся без группы.`))
+      return;
+    await api.deleteGroup(item.id);
+    if (group === item.id) group = null;
+    await onBookChanged();
+  }
+
+  function openGroupMenu(item: Group | null, event: MouseEvent) {
+    event.preventDefault();
+    groupMenu = {
+      x: Math.min(event.clientX, window.innerWidth - 230),
+      y: Math.min(event.clientY, window.innerHeight - 170),
+      group: item,
+    };
+  }
+
+  function toggleChecked(id: string) {
+    if (checked.has(id)) checked.delete(id);
+    else checked.add(id);
+    checked = new Set(checked);
+  }
+
+  async function deleteChecked() {
+    const ids = [...checked];
+    if (!ids.length) return;
+    if (
+      !confirm(
+        `Удалить ${ids.length === 1 ? "выбранный сервер" : `${ids.length} выбранных серверов`}?`,
+      )
+    ) {
+      return;
+    }
+    for (const id of ids) await api.deleteServer(id);
+    checked = new Set();
+    await onBookChanged();
+  }
+
+  async function confirmBulkMove() {
+    const ids = [...checked];
+    const target = moveGroup || null;
+    moveTarget = null;
+    if (!ids.length) return;
+    for (const id of ids) await moveServerToGroup(id, target);
+    checked = new Set();
   }
 
   function connect(server: Server) {
@@ -457,10 +514,7 @@
         <button
           class="tiny"
           title="Новая группа"
-          onclick={() => {
-            newGroupName = "";
-            groupPrompt = true;
-          }}
+          onclick={() => (groupEditor = { id: null, name: "" })}
         >
           <Plus size={15} />
         </button>
@@ -484,6 +538,7 @@
           if (moving) await reorderGroup(moving, null);
         }}
         onclick={() => (group = null)}
+        oncontextmenu={(event) => openGroupMenu(null, event)}
       >
         <Grid2x2 size={15} class="g-icon" />
         <span class="g-name">Все серверы</span>
@@ -511,6 +566,10 @@
             if (moving) await reorderGroup(moving, item.id);
           }}
           onclick={() => (group = item.id)}
+          ondblclick={() => {
+            groupEditor = { id: item.id, name: item.name };
+          }}
+          oncontextmenu={(event) => openGroupMenu(item, event)}
         >
           <span class="g-icon" style:color={item.color ?? "var(--dir)"}>
             <Folder size={15} />
@@ -523,10 +582,7 @@
       <div class="grow"></div>
       <button
         class="new-group"
-        onclick={() => {
-          newGroupName = "";
-          groupPrompt = true;
-        }}
+        onclick={() => (groupEditor = { id: null, name: "" })}
       >
         <FolderPlus size={15} />
         Новая группа
@@ -555,6 +611,36 @@
         </div>
       </div>
 
+      {#if checked.size}
+        <div class="pick-bar">
+          <span>Выбрано: {checked.size}</span>
+          <span class="grow"></span>
+          <button class="pick-btn" onclick={() => (checked = new Set())}>
+            Снять
+          </button>
+          <button
+            class="pick-btn"
+            onclick={() =>
+              (checked = new Set(visible.map((server) => server.id)))}
+          >
+            Выбрать все
+          </button>
+          <button
+            class="pick-btn"
+            onclick={() => {
+              moveGroup = "";
+              moveTarget = null;
+              bulkMoveOpen = true;
+            }}
+          >
+            В группу…
+          </button>
+          <button class="pick-btn danger" onclick={deleteChecked}>
+            <Trash2 size={13} /> Удалить
+          </button>
+        </div>
+      {/if}
+
       <div class="server-list">
         {#each visible as server (server.id)}
           <div
@@ -570,7 +656,18 @@
             ondblclick={() => connect(server)}
             onkeydown={(e) => e.key === "Enter" && connect(server)}
           >
-            <span class="check"></span>
+            <button
+              class="check"
+              class:on={checked.has(server.id)}
+              title="Выбрать сервер"
+              onclick={(event) => {
+                event.stopPropagation();
+                toggleChecked(server.id);
+              }}
+              onpointerdown={(event) => event.stopPropagation()}
+            >
+              {#if checked.has(server.id)}<span class="tick">✓</span>{/if}
+            </button>
             <span
               class="status {statusKind(server)}"
               title={statusTitle(server)}
@@ -624,6 +721,46 @@
       await onBookChanged();
     }}
   />
+{/if}
+
+{#if groupMenu}
+  <div class="menu-backdrop" onclick={() => (groupMenu = null)}></div>
+  <div
+    class="context"
+    style:left={`${groupMenu.x}px`}
+    style:top={`${groupMenu.y}px`}
+  >
+    <button
+      onclick={() => {
+        groupEditor = { id: null, name: "" };
+        groupMenu = null;
+      }}
+    >
+      Новая группа
+    </button>
+    {#if groupMenu.group}
+      <button
+        onclick={() => {
+          const item = groupMenu!.group!;
+          groupEditor = { id: item.id, name: item.name };
+          groupMenu = null;
+        }}
+      >
+        Переименовать
+      </button>
+      <div class="sep"></div>
+      <button
+        class="danger"
+        onclick={() => {
+          const item = groupMenu!.group!;
+          groupMenu = null;
+          void deleteGroup(item);
+        }}
+      >
+        Удалить группу
+      </button>
+    {/if}
+  </div>
 {/if}
 
 {#if serverMenu}
@@ -693,10 +830,20 @@
   </div>
 {/if}
 
-{#if moveTarget}
-  <div class="overlay" onclick={() => (moveTarget = null)}>
+{#if moveTarget || bulkMoveOpen}
+  <div
+    class="overlay"
+    onclick={() => {
+      moveTarget = null;
+      bulkMoveOpen = false;
+    }}
+  >
     <div class="group-dialog" onclick={(e) => e.stopPropagation()}>
-      <div class="group-title">Переместить «{moveTarget.name || moveTarget.host}»</div>
+      <div class="group-title">
+        {bulkMoveOpen
+          ? `Переместить серверов: ${checked.size}`
+          : `Переместить «${moveTarget?.name || moveTarget?.host}»`}
+      </div>
       <select bind:value={moveGroup}>
         <option value="">Без группы</option>
         {#each groups as group (group.id)}
@@ -704,8 +851,28 @@
         {/each}
       </select>
       <div class="group-foot">
-        <button class="gbtn" onclick={() => (moveTarget = null)}>Отмена</button>
-        <button class="gbtn primary" onclick={confirmMove}>Переместить</button>
+        <button
+          class="gbtn"
+          onclick={() => {
+            moveTarget = null;
+            bulkMoveOpen = false;
+          }}
+        >
+          Отмена
+        </button>
+        <button
+          class="gbtn primary"
+          onclick={() => {
+            if (bulkMoveOpen) {
+              bulkMoveOpen = false;
+              void confirmBulkMove();
+            } else {
+              confirmMove();
+            }
+          }}
+        >
+          Переместить
+        </button>
       </div>
     </div>
   </div>
@@ -772,19 +939,23 @@
   </div>
 {/if}
 
-{#if groupPrompt}
-  <div class="overlay" onclick={() => (groupPrompt = false)}>
+{#if groupEditor}
+  <div class="overlay" onclick={() => (groupEditor = null)}>
     <div class="group-dialog" onclick={(e) => e.stopPropagation()}>
-      <div class="group-title">Новая группа</div>
+      <div class="group-title">
+        {groupEditor.id ? "Группа" : "Новая группа"}
+      </div>
       <input
-        bind:value={newGroupName}
+        bind:value={groupEditor.name}
         autofocus
         placeholder="Название"
-        onkeydown={(e) => e.key === "Enter" && addGroup()}
+        onkeydown={(e) => e.key === "Enter" && saveGroupEdit()}
       />
       <div class="group-foot">
-        <button class="gbtn" onclick={() => (groupPrompt = false)}>Отмена</button>
-        <button class="gbtn primary" onclick={addGroup}>Создать</button>
+        <button class="gbtn" onclick={() => (groupEditor = null)}>Отмена</button>
+        <button class="gbtn primary" onclick={saveGroupEdit}>
+          {groupEditor.id ? "Сохранить" : "Создать"}
+        </button>
       </div>
     </div>
   </div>
@@ -1067,11 +1238,66 @@
   }
 
   .check {
+    display: grid;
+    place-items: center;
     width: 16px;
     height: 16px;
     flex: 0 0 16px;
+    padding: 0;
     border: 1px solid var(--border-strong);
     border-radius: 4px;
+    background: transparent;
+    color: #fff;
+  }
+
+  .check:hover {
+    border-color: var(--accent);
+  }
+
+  .check.on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .tick {
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .pick-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 8px 6px;
+    padding: 5px 9px;
+    background: var(--selection);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 11.5px;
+  }
+
+  .pick-bar .grow {
+    flex: 1;
+  }
+
+  .pick-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    color: var(--dim);
+    font-size: 11px;
+  }
+
+  .pick-btn:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+
+  .pick-btn.danger {
+    color: var(--error);
   }
 
   .status {

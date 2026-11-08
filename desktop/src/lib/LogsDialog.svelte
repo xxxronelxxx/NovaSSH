@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Copy, RefreshCw, X } from "lucide-svelte";
+  import { Copy, FolderOpen, RefreshCw, X } from "lucide-svelte";
   import { api, formatBytes, type LogFile } from "../lib/api";
 
   let { onClose }: { onClose: () => void } = $props();
@@ -61,6 +61,13 @@
       <label class="check">
         <input type="checkbox" bind:checked={onlyProblems} /> только проблемы
       </label>
+      <button
+        class="icon"
+        title="Открыть папку журнала"
+        onclick={() => dir && api.revealInExplorer(dir).catch(() => {})}
+      >
+        <FolderOpen size={14} />
+      </button>
       <button class="icon" title="Обновить" onclick={() => load()}>
         <span class="icon-wrap" class:spin={busy}>
             <RefreshCw size={14} />

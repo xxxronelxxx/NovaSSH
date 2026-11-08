@@ -80,6 +80,7 @@
   let editingPath = $state(false);
   let pathDraft = $state("");
   let root: HTMLElement | undefined = $state();
+  let rowsEl: HTMLDivElement | undefined = $state();
   let pointerDrag = $state<{
     x: number;
     y: number;
@@ -99,6 +100,18 @@
   }
 
   const selectedSet = $derived(new Set(selected));
+
+  $effect(() => {
+    const path = selected[selected.length - 1];
+    if (!path || !rowsEl) return;
+    const row = rowsEl.querySelector(".row.selected") as HTMLElement | null;
+    row?.scrollIntoView({ block: "nearest" });
+  });
+
+  $effect(() => {
+    listing?.path;
+    if (rowsEl) rowsEl.scrollTop = 0;
+  });
 
   const compareMap = $derived(
     new Map(
@@ -464,6 +477,7 @@
 
   <div
     class="rows"
+    bind:this={rowsEl}
     ondragover={(event) => {
       if (event.dataTransfer?.types.includes("application/x-nova-paths")) {
         event.preventDefault();

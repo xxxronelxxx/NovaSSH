@@ -241,9 +241,27 @@
     importPrompt = false;
     pendingImport = null;
     if (!path) return;
-    await api.importProfile(path, replace);
-    await onImported?.();
-    await onClose();
+    try {
+      const report = await api.importProfile(path, replace);
+      await onImported?.();
+      const parts = [
+        report.replaced
+          ? "профиль заменён"
+          : `добавлено серверов: ${report.servers}`,
+        `групп: ${report.groups}`,
+        `сниппетов: ${report.snippets}`,
+        `паролей: ${report.secrets}`,
+        report.backupDir ? `бэкап: ${report.backupDir}` : "",
+      ].filter(Boolean);
+      toast = parts.join(" · ");
+      if (savedTimer) clearTimeout(savedTimer);
+      savedTimer = setTimeout(() => {
+        toast = null;
+        savedTimer = null;
+      }, 6000);
+    } catch (e) {
+      error = `Импорт: ${e}`;
+    }
   }
 
   async function showCredentials() {

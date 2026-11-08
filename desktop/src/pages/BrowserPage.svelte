@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import BulkRenameDialog from "../lib/BulkRenameDialog.svelte";
+  import PermissionsDialog from "../lib/PermissionsDialog.svelte";
   import BookmarksDialog from "../lib/BookmarksDialog.svelte";
   import TransferPromptDialog from "../lib/TransferPromptDialog.svelte";
   import hljs from "highlight.js/lib/common";
@@ -36,6 +37,7 @@
     onSelectTab,
     onCloseTab,
     onReorderTab,
+    onSwapTabs,
     onAddTab,
     onBack,
     onLocalPath,
@@ -55,15 +57,21 @@
     onSelectTab: (id: string) => void;
     onCloseTab: (id: string) => void;
     onReorderTab: (fromId: string, toId: string) => void;
+    onSwapTabs: (fromId: string, toId: string) => void;
     onAddTab: () => void;
     onBack: () => void;
-    onLocalPath: (path: string) => void | Promise<void>;
-    onRemotePath: (tabId: string, path: string) => void | Promise<void>;
+    onLocalPath: (path: string, showHidden?: boolean) => void | Promise<void>;
+    onRemotePath: (
+      tabId: string,
+      path: string,
+      showHidden?: boolean,
+    ) => void | Promise<void>;
     onTransfer: (
       direction: "upload" | "download",
       sourcePath: string,
       targetDir: string,
       targetName?: string | null,
+      background?: boolean,
     ) => void;
     onCancelTransfer: (id: string) => void;
     onTrackTransfer: (event: TransferEvent) => void;
@@ -107,6 +115,8 @@
     title: string;
     message: string;
     action: () => Promise<void>;
+    label?: string;
+    kind?: "danger" | "primary";
   } | null>(null);
   let editor = $state<{
     entry: Entry;
@@ -118,6 +128,7 @@
   } | null>(null);
   let wrap = $state(false);
   let editorScroll = $state(0);
+  let editorScrollX = $state(0);
   let info = $state<{ title: string; text: string } | null>(null);
 
   const editWatchers = new Map<
@@ -133,8 +144,15 @@
   let compareOpen = $state(false);
   let bulkOpen = $state(false);
   let bookmarksOpen = $state(false);
+  let permissionsEntry = $state<Entry | null>(null);
+  let extracted = $state<{
+    tabId: string;
+    from: string;
+    root: string;
+  } | null>(null);
   let dirCompare = $state(false);
   let split = $state(false);
+  let selecting = $state(false);
   let tabMenu = $state<{ x: number; y: number; id: string } | null>(null);
   let transferPrompt = $state<{
     direction: "upload" | "download";
@@ -267,12 +285,41 @@
 
   function selectLocal(entry: Entry, mode: "single" | "toggle" | "range") {
     focused = "local";
-    localSel = applySelection(localSel, localListing?.entries ?? [], entry, mode);
+    localSel = applySelection(
+      localSel,
+      localListing?.entries ?? [],
+      entry,
+      selecting ? "toggle" : mode,
+    );
   }
 
   function selectRemote(entry: Entry, mode: "single" | "toggle" | "range") {
     focused = "remote";
-    remoteSel = applySelection(remoteSel, remote?.entries ?? [], entry, mode);
+    remoteSel = applySelection(
+      remoteSel,
+      remote?.entries ?? [],
+      entry,
+      selecting ? "toggle" : mode,
+    );
+  }
+
+  function beginSelection(entry: Entry) {
+    selecting = true;
+    if (focused === "local") {
+      localSel = localSel.includes(entry.path)
+        ? localSel
+        : [...localSel, entry.path];
+    } else {
+      remoteSel = remoteSel.includes(entry.path)
+        ? remoteSel
+        : [...remoteSel, entry.path];
+    }
+  }
+
+  function endSelection() {
+    selecting = false;
+    localSel = [];
+    remoteSel = [];
   }
 
   function isArchiveName(name: string): boolean {
@@ -283,13 +330,31 @@
     ].some((suffix) => lower.endsWith(suffix));
   }
 
+  function effectiveHidden(): boolean {
+    return (
+      settings?.panels?.showHidden === true ||
+      filter.trim().startsWith(".")
+    );
+  }
+
   async function reload() {
     if (!listing) return;
     if (focused === "local") {
       if (archive) await loadArchive(archive.inner);
-      else await onLocalPath(listing.path);
+      else await onLocalPath(listing.path, effectiveHidden());
     } else if (tab) {
-      await onRemotePath(tab.id, listing.path);
+      await onRemotePath(tab.id, listing.path, effectiveHidden());
+    }
+  }
+
+  let filterHidden = $state(false);
+
+  function handleFilter(value: string) {
+    filter = value;
+    const hidden = value.trim().startsWith(".");
+    if (hidden !== filterHidden) {
+      filterHidden = hidden;
+      void reload();
     }
   }
 
@@ -325,7 +390,7 @@
     }
     const name = baseName(path);
     focused = "local";
-    await onLocalPath(path);
+    await onLocalPath(path, effectiveHidden());
     await syncOther(name);
   }
 
@@ -334,7 +399,15 @@
     remoteSel = [];
     const name = baseName(path);
     focused = "remote";
-    await onRemotePath(tab.id, path);
+    await onRemotePath(tab.id, path, effectiveHidden());
+    if (
+      extracted &&
+      extracted.tabId === tab.id &&
+      path !== extracted.root &&
+      !path.startsWith(`${extracted.root.replace(/\/$/, "")}/`)
+    ) {
+      extracted = null;
+    }
     await syncOther(name);
   }
 
@@ -346,7 +419,7 @@
       const listed = await api.listArchive(
         current.path,
         normalized,
-        settings?.panels?.showHidden ?? true,
+        effectiveHidden(),
       );
       archive = { ...current, inner: normalized, listing: listed };
       localSel = [];
@@ -493,6 +566,17 @@
     });
   }
 
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function flashNotice(message: string) {
+    notice = message;
+    if (noticeTimer) clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      notice = null;
+      noticeTimer = null;
+    }, 1800);
+  }
+
   async function run(label: string, action: () => Promise<void>) {
     busy = label;
     error = null;
@@ -520,8 +604,10 @@
     title: string,
     message: string,
     action: () => Promise<void>,
+    label = "Удалить",
+    kind: "danger" | "primary" = "danger",
   ) {
-    confirm = { title, message, action };
+    confirm = { title, message, action, label, kind };
   }
 
   async function submitPrompt() {
@@ -638,7 +724,11 @@
     };
   }
 
-  function confirmTransfer(result: { dir: string; name: string | null }) {
+  function confirmTransfer(result: {
+    dir: string;
+    name: string | null;
+    background: boolean;
+  }) {
     const prompt = transferPrompt;
     transferPrompt = null;
     if (!prompt) return;
@@ -648,6 +738,7 @@
         entry.path,
         result.dir,
         prompt.items.length === 1 ? result.name : null,
+        result.background,
       );
     }
   }
@@ -1029,6 +1120,10 @@
       const text = current
         ? await api.previewArchive(current.path, entry.path, 262144, null)
         : await api.preview(sid, entry.path, 262144);
+      if (mode === "edit" && !current && text.includes("\u0000")) {
+        error = "Похоже на бинарный файл — редактирование недоступно";
+        return;
+      }
       editor = {
         entry,
         text,
@@ -1037,7 +1132,91 @@
         inArchive: !!current,
         saved: text,
       };
+      if (mode === "edit" && !current) {
+        logEdit("открыт во встроенном редакторе");
+      }
     });
+  }
+
+  function closeTopDialog(): boolean {
+    if (menu) {
+      menu = null;
+      return true;
+    }
+    if (tabMenu) {
+      tabMenu = null;
+      return true;
+    }
+    if (prompt) {
+      prompt = null;
+      return true;
+    }
+    if (secret) {
+      secret.cancel?.();
+      secret = null;
+      return true;
+    }
+    if (confirm) {
+      confirm = null;
+      return true;
+    }
+    if (editor) {
+      closeEditor();
+      return true;
+    }
+    if (info) {
+      info = null;
+      return true;
+    }
+    if (permissionsEntry) {
+      permissionsEntry = null;
+      return true;
+    }
+    if (transferPrompt) {
+      transferPrompt = null;
+      return true;
+    }
+    if (createOpen) {
+      createOpen = false;
+      return true;
+    }
+    if (findOpen) {
+      findOpen = false;
+      return true;
+    }
+    if (compareOpen) {
+      compareOpen = false;
+      return true;
+    }
+    if (syncOpen) {
+      syncOpen = false;
+      return true;
+    }
+    if (bulkOpen) {
+      bulkOpen = false;
+      return true;
+    }
+    if (bookmarksOpen) {
+      bookmarksOpen = false;
+      return true;
+    }
+    return false;
+  }
+
+  function closeEditor() {
+    if (editorDirty) {
+      askConfirm(
+        "Закрыть без сохранения?",
+        "Изменения будут потеряны.",
+        async () => {
+          editor = null;
+        },
+        "Закрыть",
+        "primary",
+      );
+      return;
+    }
+    editor = null;
   }
 
   function editSelected() {
@@ -1050,17 +1229,23 @@
     const current = editor;
     if (!current || current.inArchive) return;
     await run("Сохраняю…", async () => {
-      await api.saveText(
-        {
-          sessionId: current.sessionId,
-          archivePath: null,
-          path: current.entry.path,
-          label: null,
-        },
-        current.text,
-      );
+      try {
+        await api.saveText(
+          {
+            sessionId: current.sessionId,
+            archivePath: null,
+            path: current.entry.path,
+            label: null,
+          },
+          current.text,
+        );
+      } catch (e) {
+        logEdit(`ошибка сохранения: ${e}`);
+        throw e;
+      }
       logEdit("сохранён");
-      editor = null;
+      if (editor) editor.saved = editor.text;
+      flashNotice("Сохранено");
       await reload();
     });
   }
@@ -1088,10 +1273,9 @@
   function highlightCode(text: string, name: string): string {
     if (text.length > 120000) return "";
     const language = languageFor(name);
+    if (!language) return "";
     try {
-      return language
-        ? hljs.highlight(text, { language, ignoreIllegals: true }).value
-        : hljs.highlightAuto(text.slice(0, 60000)).value;
+      return hljs.highlight(text, { language, ignoreIllegals: true }).value;
     } catch {
       return "";
     }
@@ -1101,6 +1285,12 @@
     if (!editor || editor.mode === "edit") return "";
     return highlightCode(editor.text.slice(0, 200000), editor.entry.name);
   });
+
+  const editHighlighted = $derived.by(() => {
+    if (!editor || editor.mode !== "edit") return "";
+    return highlightCode(editor.text, editor.entry.name);
+  });
+  const hasEditHighlight = $derived(editHighlighted.length > 0);
 
   const editorTruncated = $derived((editor?.text.length ?? 0) >= 262140);
   const editorDirty = $derived(
@@ -1166,13 +1356,7 @@
       error = "В архиве права не меняются";
       return;
     }
-    const current = entry.mode != null ? (entry.mode & 0o777).toString(8) : "644";
-    ask("Права доступа", "Восьмерично, например 644", current, async (value) => {
-      const mode = Number.parseInt(value.trim(), 8);
-      if (Number.isNaN(mode)) throw new Error("Нужно восьмеричное число");
-      await api.chmod(sessionId, entry.path, mode, false);
-      await reload();
-    });
+    permissionsEntry = entry;
   }
 
   async function copyPath() {
@@ -1302,6 +1486,7 @@
     const lower = name.toLowerCase();
     for (const suffix of [
       ".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".zip", ".tar", ".7z",
+      ".gz", ".bz2", ".xz", ".zst",
     ]) {
       if (lower.endsWith(suffix)) {
         return `${name.slice(0, -suffix.length)}.${format}`;
@@ -1427,7 +1612,8 @@
         target.isContentEditable) &&
       !isFunctionKey &&
       !ctrlD &&
-      !altF7
+      !altF7 &&
+      event.key !== "Escape"
     ) {
       return;
     }
@@ -1461,6 +1647,21 @@
       const entries = listing?.entries ?? [];
       if (focused === "local") localSel = entries.map((entry) => entry.path);
       else remoteSel = entries.map((entry) => entry.path);
+      return;
+    }
+    if (
+      event.shiftKey &&
+      (event.key === "Home" || event.key === "End")
+    ) {
+      event.preventDefault();
+      const entries = listing?.entries ?? [];
+      if (!entries.length) return;
+      const target = event.key === "Home" ? entries[0] : entries[entries.length - 1];
+      if (focused === "local") {
+        localSel = applySelection(localSel, entries, target, "range");
+      } else {
+        remoteSel = applySelection(remoteSel, entries, target, "range");
+      }
       return;
     }
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -1547,8 +1748,13 @@
         openSelected();
         break;
       case "Escape":
-        if (focused === "local") localSel = [];
-        else remoteSel = [];
+        if (closeTopDialog()) break;
+        if (selecting) {
+          endSelection();
+        } else {
+          if (focused === "local") localSel = [];
+          else remoteSel = [];
+        }
         menu = null;
         break;
     }
@@ -1606,8 +1812,59 @@
     onEdit={editSelected}
     onTerminal={toggleTerminal}
     onSettings={onSettings}
-    onFilter={(value) => (filter = value)}
+    onFilter={handleFilter}
   />
+
+  {#if extracted && extracted.tabId === tab?.id && tab}
+    <div class="extracted-bar">
+      <span>
+        Архив развёрнут на сервере: <code>{extracted.root}</code>
+      </span>
+      <span class="grow"></span>
+      <button
+        class="pick-btn"
+        onclick={() => {
+          const from = extracted!.from;
+          extracted = null;
+          const dir = from.replace(/\/[^/]+$/, "") || "/";
+          void onRemotePath(tab!.id, dir);
+        }}
+      >
+        Вернуться к папке
+      </button>
+      <button class="pick-btn" onclick={() => (extracted = null)}>
+        Скрыть
+      </button>
+    </div>
+  {/if}
+
+  {#if selecting}
+    <div class="select-bar">
+      <span>Выбрано: {selectedPaths.length}</span>
+      <span class="grow"></span>
+      <button class="pick-btn" onclick={() => (focused === "local" ? (localSel = []) : (remoteSel = []))}>
+        Снять
+      </button>
+      <button class="pick-btn" onclick={copyBetween} disabled={!selectedPaths.length}>
+        Копировать
+      </button>
+      <button
+        class="pick-btn"
+        disabled={selectedPaths.length !== 1}
+        onclick={renameSelected}
+      >
+        Переименовать
+      </button>
+      <button
+        class="pick-btn danger"
+        disabled={!selectedPaths.length}
+        onclick={deleteSelected}
+      >
+        Удалить
+      </button>
+      <button class="pick-btn" onclick={endSelection}>Готово</button>
+    </div>
+  {/if}
 
   <div class="panes">
     <PaneCard
@@ -1724,6 +1981,11 @@
         sessionId={tab.sessionId}
         serverId={tab.server.id}
         title={tab.label}
+        path={remote?.path ?? ""}
+        file={selectedEntry?.name ?? ""}
+        serverHost={tab.server.host}
+        user={tab.server.user}
+        port={tab.server.port}
         context={[
           `хост: ${tab.server.host}:${tab.server.port}`,
           `пользователь: ${tab.server.user}`,
@@ -1755,6 +2017,18 @@
     <button onclick={() => showOnlyTab(tabMenu!.id)}>
       Показать только этот сервер
     </button>
+    {#each tabs.filter((item) => item.id !== tabMenu?.id) as other (other.id)}
+      <button
+        onclick={() => {
+          const id = tabMenu!.id;
+          tabMenu = null;
+          onSwapTabs(id, other.id);
+        }}
+      >
+        Поменять с {other.label}
+      </button>
+    {/each}
+    <div class="sep"></div>
     <button
       onclick={() => {
         const id = tabMenu!.id;
@@ -1773,6 +2047,16 @@
     {#if menu.entry}
       <button onclick={() => menuAction(openSelected)}>
         {menu.entry.kind === "dir" ? "Открыть" : "Просмотр (F3)"}
+      </button>
+      <button
+        onclick={() => {
+          const entry = menu?.entry ?? null;
+          menuAction(() => {
+            if (entry) beginSelection(entry);
+          });
+        }}
+      >
+        Выделить несколько
       </button>
       <button onclick={() => menuAction(copyPath)}>Копировать путь</button>
       {#if menu.entry.kind !== "dir"}
@@ -1836,6 +2120,15 @@
       {/if}
     {/if}
   </div>
+{/if}
+
+{#if permissionsEntry}
+  <PermissionsDialog
+    entry={permissionsEntry}
+    {sessionId}
+    onClose={() => (permissionsEntry = null)}
+    onApplied={reload}
+  />
 {/if}
 
 {#if transferPrompt}
@@ -1948,20 +2241,27 @@
 {/if}
 
 {#if confirm}
-  <div class="overlay" onclick={() => (confirm = null)}>
+  <div class="overlay confirm-overlay" onclick={() => (confirm = null)}>
     <div class="dialog" onclick={(e) => e.stopPropagation()}>
       <div class="dialog-title">{confirm.title}</div>
       <div class="message">{confirm.message}</div>
       <div class="foot">
         <button class="btn" onclick={() => (confirm = null)}>Отмена</button>
-        <button class="btn danger" onclick={submitConfirm}>Удалить</button>
+        <button
+          class:btn={true}
+          class:danger={confirm.kind !== "primary"}
+          class:primary={confirm.kind === "primary"}
+          onclick={submitConfirm}
+        >
+          {confirm.label ?? "Удалить"}
+        </button>
       </div>
     </div>
   </div>
 {/if}
 
 {#if editor}
-  <div class="overlay" onclick={() => (editor = null)}>
+  <div class="overlay" onclick={closeEditor}>
     <div class="viewer" onclick={(e) => e.stopPropagation()}>
       <div class="viewer-head">
         <span>{editor.entry.name}</span>
@@ -1991,13 +2291,18 @@
           <button
             class="btn"
             onclick={() => {
-              if (editor) editor.mode = "edit";
+              if (!editor) return;
+              if (editor.text.includes(" ")) {
+                error = "Похоже на бинарный файл — редактирование недоступно";
+                return;
+              }
+              editor.mode = "edit";
             }}
           >
             Изменить
           </button>
         {/if}
-        <button class="btn" onclick={() => (editor = null)}>Закрыть</button>
+        <button class="btn" onclick={closeEditor}>Закрыть</button>
       </div>
       {#if editor.mode === "edit"}
         <div class="edit-body">
@@ -2006,19 +2311,31 @@
               <div>{index + 1}</div>
             {/each}
           </div>
-          <textarea
-            bind:value={editor.text}
-            class:wrap
-            spellcheck="false"
-            onscroll={(e) =>
-              (editorScroll = (e.target as HTMLTextAreaElement).scrollTop)}
-            onkeydown={(e) => {
-              if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-                e.preventDefault();
-                void saveEditor();
-              }
-            }}
-          ></textarea>
+          <div class="code-wrap">
+            {#if hasEditHighlight}
+              <pre
+                class="edit-highlight"
+                class:wrap
+                style:transform={`translate(${-editorScrollX}px, ${-editorScroll}px)`}>{@html editHighlighted}</pre>
+            {/if}
+            <textarea
+              bind:value={editor.text}
+              class:wrap
+              class:transparent={hasEditHighlight}
+              spellcheck="false"
+              onscroll={(e) => {
+                const area = e.target as HTMLTextAreaElement;
+                editorScroll = area.scrollTop;
+                editorScrollX = area.scrollLeft;
+              }}
+              onkeydown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+                  e.preventDefault();
+                  void saveEditor();
+                }
+              }}
+            ></textarea>
+          </div>
         </div>
         {#if editorTruncated}
           <div class="warn">Файл больше 256 КБ — сохранение отключено.</div>
@@ -2063,6 +2380,12 @@
           <option value="tar.zst">TAR.ZST (.tar.zst)</option>
           <option value="7z">7Z (.7z)</option>
           <option value="tar">TAR (.tar)</option>
+          {#if selectedEntries.length === 1 && selectedEntry?.kind === "file"}
+            <option value="gz">GZ (.gz)</option>
+            <option value="bz2">BZ2 (.bz2)</option>
+            <option value="xz">XZ (.xz)</option>
+            <option value="zst">ZST (.zst)</option>
+          {/if}
         </select>
       </label>
       <div class="foot">
@@ -2134,6 +2457,68 @@
     flex-direction: column;
     flex: 1;
     min-height: 0;
+  }
+
+  .extracted-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 18px 8px;
+    padding: 5px 10px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+
+  .extracted-bar code {
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    user-select: text;
+  }
+
+  .extracted-bar .grow {
+    flex: 1;
+  }
+
+  .select-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 18px 8px;
+    padding: 5px 10px;
+    background: var(--selection);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 11.5px;
+  }
+
+  .select-bar .grow {
+    flex: 1;
+  }
+
+  .pick-btn {
+    padding: 3px 8px;
+    border-radius: 4px;
+    color: var(--dim);
+    font-size: 11px;
+  }
+
+  .pick-btn:hover {
+    background: var(--hover);
+    color: var(--text);
+  }
+
+  .pick-btn.danger {
+    color: var(--error);
+  }
+
+  .pick-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
 
   .panes {
@@ -2221,6 +2606,10 @@
     place-items: center;
     background: rgba(0, 0, 0, 0.4);
     z-index: 60;
+  }
+
+  .overlay.confirm-overlay {
+    z-index: 95;
   }
 
   .dialog {
@@ -2387,32 +2776,117 @@
 
   .viewer textarea.wrap,
   .viewer pre.code :global(.hljs-keyword),
+  .viewer .edit-highlight :global(.hljs-keyword),
   .viewer pre.code :global(.hljs-selector-tag),
-  .viewer pre.code :global(.hljs-built_in) {
+  .viewer .edit-highlight :global(.hljs-selector-tag),
+  .viewer pre.code :global(.hljs-built_in),
+  .viewer .edit-highlight :global(.hljs-built_in) {
     color: #c792ea;
   }
 
   .viewer pre.code :global(.hljs-string),
-  .viewer pre.code :global(.hljs-attr) {
+  .viewer .edit-highlight :global(.hljs-string),
+  .viewer pre.code :global(.hljs-attr),
+  .viewer .edit-highlight :global(.hljs-attr) {
     color: #a5e075;
   }
 
   .viewer pre.code :global(.hljs-number),
-  .viewer pre.code :global(.hljs-literal) {
+  .viewer .edit-highlight :global(.hljs-number),
+  .viewer pre.code :global(.hljs-literal),
+  .viewer .edit-highlight :global(.hljs-literal) {
     color: #f0c04a;
   }
 
-  .viewer pre.code :global(.hljs-comment) {
+  .viewer pre.code :global(.hljs-meta),
+  .viewer .edit-highlight :global(.hljs-meta) {
+    color: #82aaff;
+  }
+
+  .viewer pre.code :global(.hljs-variable),
+  .viewer .edit-highlight :global(.hljs-variable),
+  .viewer pre.code :global(.hljs-params),
+  .viewer .edit-highlight :global(.hljs-params) {
+    color: #f78c6c;
+  }
+
+  .viewer pre.code :global(.hljs-comment),
+  .viewer .edit-highlight :global(.hljs-comment) {
     color: var(--faint);
     font-style: italic;
   }
 
   .viewer pre.code :global(.hljs-title),
-  .viewer pre.code :global(.hljs-function) {
+  .viewer .edit-highlight :global(.hljs-title),
+  .viewer pre.code :global(.hljs-function),
+  .viewer .edit-highlight :global(.hljs-function) {
     color: #6cb6ff;
   }
 
   .viewer pre.wrap {
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .code-wrap {
+    position: relative;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+    background: var(--panel);
+  }
+
+  .viewer .code-wrap .edit-highlight {
+    position: absolute;
+    color: var(--text);
+    inset: 0;
+    margin: 0;
+    padding: 12px 14px;
+    box-sizing: border-box;
+    overflow: hidden;
+    pointer-events: none;
+    background: transparent;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre;
+    tab-size: 2;
+  }
+
+  .viewer .code-wrap textarea {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 12px 14px;
+    box-sizing: border-box;
+    border: 0;
+    outline: 0;
+    resize: none;
+    overflow: auto;
+    background: transparent;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre;
+    tab-size: 2;
+    caret-color: var(--text);
+    user-select: text;
+  }
+
+  .viewer .code-wrap textarea.transparent {
+    color: transparent;
+  }
+
+  .viewer .code-wrap textarea.transparent::selection {
+    background: rgba(76, 141, 255, 0.35);
+  }
+
+  .viewer .code-wrap textarea.wrap,
+  .viewer .code-wrap pre.wrap {
     white-space: pre-wrap;
     word-break: break-all;
   }
