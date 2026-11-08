@@ -5,6 +5,7 @@
   import {
     api,
     formatBytes,
+    joinPath,
     type SyncEntry,
     type TransferEvent,
   } from "../lib/api";
@@ -63,6 +64,15 @@
     );
   }
 
+  async function ensureDirs(base: string, relative: string, sessionId: string | null) {
+    if (!relative.trim()) return;
+    let current = base;
+    for (const part of relative.split("/").filter(Boolean)) {
+      current = joinPath(current, part);
+      await api.mkdir(sessionId, current).catch(() => {});
+    }
+  }
+
   async function execute() {
     const list = entries.filter(
       (entry) => entry.action !== "skip" && selected.has(entry.relative),
@@ -75,13 +85,25 @@
     try {
       for (const entry of list) {
         current = entry.relative;
+        const parts = entry.relative.split("/");
+        parts.pop();
+        const sub = parts.join("/");
+        const targetRoot = entry.action === "upload" ? remoteRoot : localRoot;
+        const targetDir = sub ? joinPath(targetRoot, sub) : targetRoot;
+        if (sub) {
+          await ensureDirs(
+            targetRoot,
+            sub,
+            entry.action === "upload" ? sessionId : null,
+          );
+        }
         const channel = new Channel<TransferEvent>();
         channel.onmessage = () => {};
         await api.transferFile(
           sessionId,
           entry.action,
           entry.action === "upload" ? entry.localPath : entry.remotePath,
-          entry.action === "upload" ? remoteRoot : localRoot,
+          targetDir,
           0,
           0,
           false,

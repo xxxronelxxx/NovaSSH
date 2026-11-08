@@ -1277,9 +1277,14 @@
 
   async function assembleVolumes() {
     if (!listing) return;
-    const parts = listing.entries
+    const selectedParts = selectedEntries
       .filter((entry) => looksLikeVolume(entry.name))
       .map((entry) => entry.path);
+    const parts = selectedParts.length
+      ? selectedParts
+      : listing.entries
+          .filter((entry) => looksLikeVolume(entry.name))
+          .map((entry) => entry.path);
     if (parts.length < 2) {
       error = "Выделите все части архива";
       return;
@@ -1319,7 +1324,9 @@
     if (!name) return;
     createOpen = false;
     const targetPath = joinPath(listing.path, name);
-    const sources = [entry.path];
+    const sources = selectedEntries.length
+      ? selectedEntries.map((item) => item.path)
+      : [entry.path];
     const token = `create_${Date.now()}`;
 
     if (focused === "remote") {
@@ -1416,10 +1423,18 @@
 
   function onKey(event: KeyboardEvent) {
     const target = event.target as HTMLElement | null;
+    const isFunctionKey = /^F([1-9]|1[0-2])$/.test(event.key);
+    const ctrlD = event.ctrlKey && event.key.toLowerCase() === "d";
+    const altF7 = event.altKey && event.key === "F7";
+    // Text fields keep their typing, except the file-manager function keys
+    // (F2-F8) and the bookmark/find shortcuts, like in the Flutter app.
     if (
       target &&
       (/^(input|textarea|select)$/i.test(target.tagName) ||
-        target.isContentEditable)
+        target.isContentEditable) &&
+      !isFunctionKey &&
+      !ctrlD &&
+      !altF7
     ) {
       return;
     }
