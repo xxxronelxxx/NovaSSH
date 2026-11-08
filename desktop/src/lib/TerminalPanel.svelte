@@ -11,11 +11,13 @@
 
   let {
     sessionId,
+    serverId = null,
     title,
     context = "",
     onClose,
   }: {
     sessionId: string;
+    serverId?: string | null;
     title: string;
     context?: string;
     onClose: () => void;
@@ -57,7 +59,13 @@
       term = t;
 
       favorites = (await api.loadSnippets().catch(() => []))
-        .filter((item) => item.favorite)
+        .filter(
+          (item) =>
+            item.favorite &&
+            (item.scope !== "server" ||
+              !item.serverId ||
+              item.serverId === serverId),
+        )
         .sort((a, b) => a.order - b.order);
       shellId = await api.openShell(sessionId, t.cols, t.rows);
       t.onData((data) => {
@@ -160,6 +168,7 @@
 
 {#if snippetsOpen}
   <SnippetsDialog
+    {serverId}
     onClose={() => (snippetsOpen = false)}
     onInsert={(command) => writeCommand(command, false)}
     onRun={(command) => writeCommand(command, true)}

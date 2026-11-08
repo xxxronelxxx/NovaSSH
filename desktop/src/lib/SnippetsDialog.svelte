@@ -18,10 +18,12 @@
     onClose,
     onInsert,
     onRun,
+    serverId = null,
   }: {
     onClose: () => void;
     onInsert: (command: string) => void;
     onRun: (command: string) => void;
+    serverId?: string | null;
   } = $props();
 
   let snippets = $state<Snippet[]>([]);
@@ -32,14 +34,20 @@
 
   const filtered = $derived.by(() => {
     const text = query.trim().toLowerCase();
-    const list = text
+    const list = (text
       ? snippets.filter(
           (item) =>
             item.name.toLowerCase().includes(text) ||
             item.command.toLowerCase().includes(text) ||
             item.description.toLowerCase().includes(text),
         )
-      : snippets;
+      : snippets
+    ).filter(
+      (item) =>
+        item.scope !== "server" ||
+        !item.serverId ||
+        item.serverId === serverId,
+    );
     return [...list].sort((a, b) => {
       if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
       return a.order - b.order || a.name.localeCompare(b.name, "ru");
@@ -169,6 +177,23 @@
           <span>Описание</span>
           <input bind:value={editing.description} />
         </label>
+        {#if serverId}
+          <label class="check">
+            <input
+              type="checkbox"
+              checked={editing.scope === "server"}
+              onchange={(event) => {
+                if (!editing) return;
+                editing.scope = (event.target as HTMLInputElement).checked
+                  ? "server"
+                  : "global";
+                editing.serverId =
+                  editing.scope === "server" ? serverId : null;
+              }}
+            />
+            Только для этого сервера
+          </label>
+        {/if}
         <div class="checks">
           <label><input type="checkbox" bind:checked={editing.favorite} /> В избранное</label>
           <label><input type="checkbox" bind:checked={editing.runImmediately} /> Выполнять сразу</label>

@@ -121,23 +121,21 @@
     }
   }
 
-  function addTab(server: Server, sessionId: string) {
-    const existing = tabs.find((item) => item.id === server.id);
-    if (existing) {
-      existing.sessionId = sessionId;
-      existing.listing = null;
-    } else {
-      tabs.push({
-        id: server.id,
-        label: server.name || server.host,
-        server,
-        sessionId,
-        listing: null,
-      });
-    }
-    activeTabId = server.id;
+  let tabSeq = 0;
+
+  function addTab(server: Server, sessionId: string): string {
+    const id = `tab_${server.id}_${Date.now()}_${tabSeq++}`;
+    tabs.push({
+      id,
+      label: server.name || server.host,
+      server,
+      sessionId,
+      listing: null,
+    });
+    activeTabId = id;
     showConnections = false;
     showSettings = false;
+    return id;
   }
 
   let persistTimer: ReturnType<typeof setTimeout> | null = null;
@@ -196,11 +194,11 @@
 
     try {
       const result = await api.connectServer(server.id, password);
-      addTab(server, result.sessionId);
+      const tabId = addTab(server, result.sessionId);
       if (restore) {
         if (restore.localPath) await loadLocal(restore.localPath);
         await loadRemote(
-          server.id,
+          tabId,
           restore.remotePath || result.startPath,
         );
         await api
@@ -211,7 +209,7 @@
           )
           .catch(() => {});
       } else {
-        await loadRemote(server.id, result.startPath);
+        await loadRemote(tabId, result.startPath);
       }
       if (result.warnings.length) notice = result.warnings.join(" · ");
       await persistSessions();

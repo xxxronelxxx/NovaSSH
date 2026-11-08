@@ -1714,6 +1714,7 @@
     <div class="terminal-wrap">
       <TerminalPanel
         sessionId={tab.sessionId}
+        serverId={tab.server.id}
         title={tab.label}
         context={[
           `хост: ${tab.server.host}:${tab.server.port}`,
