@@ -6,23 +6,29 @@
     Grid2x2,
     KeyRound,
     Lock,
+    Pencil,
     Plus,
     Search,
     Settings2,
   } from "lucide-svelte";
+  import ServerEditor from "../lib/ServerEditor.svelte";
   import type { BrowserTab } from "../lib/browser";
-  import type { Group, Server, ServerBook } from "../lib/api";
+  import { api, type Group, type Server, type ServerBook } from "../lib/api";
 
   let {
     book,
     openTabs = [],
     onConnect,
     onOpenTab,
+    onBookChanged,
+    onSettings,
   }: {
     book: ServerBook | null;
     openTabs?: BrowserTab[];
     onConnect: (server: Server) => void;
     onOpenTab: (id: string) => void;
+    onBookChanged: () => Promise<void>;
+    onSettings: () => void;
   } = $props();
 
   type Protocol = "all" | "ssh" | "ftp" | "s3";
@@ -31,6 +37,10 @@
   let group = $state<string | null>(null);
   let protocol = $state<Protocol>("all");
   let selected = $state<string | null>(null);
+  let editing = $state<Server | "new" | null>(null);
+  let newGroupName = $state("");
+  let groupPrompt = $state(false);
+  let settingsBusy = $state(false);
 
   const groups: Group[] = $derived(book?.groups ?? []);
   const servers: Server[] = $derived(book?.servers ?? []);
@@ -67,6 +77,22 @@
     });
   });
 
+  async function addGroup() {
+    const name = newGroupName.trim();
+    if (!name) return;
+    groupPrompt = false;
+    await api.saveGroup({
+      id: `g_${Date.now()}`,
+      name,
+      parent: null,
+      color: null,
+      order: groups.length,
+      expanded: true,
+      icon: null,
+    });
+    await onBookChanged();
+  }
+
   function connect(server: Server) {
     selected = server.id;
     onConnect(server);
@@ -86,7 +112,7 @@
     <button class="top-btn" title="Импорт из WinSCP" disabled>
       <FolderPlus size={17} />
     </button>
-    <button class="top-btn" title="Новый сервер" disabled>
+    <button class="top-btn" title="Новый сервер" onclick={() => (editing = "new")}>
       <Plus size={17} />
     </button>
     <button class="top-btn" title="Продолжить сессию" disabled>
@@ -95,7 +121,7 @@
     <button class="top-btn" title="Ключи" disabled>
       <KeyRound size={17} />
     </button>
-    <button class="top-btn" title="Настройки" disabled>
+    <button class="top-btn" title="Настройки" onclick={onSettings}>
       <Settings2 size={17} />
     </button>
     <button class="top-btn" title="Заблокировать" disabled>
@@ -119,7 +145,14 @@
     <aside class="card groups">
       <div class="card-head">
         <span>Группы</span>
-        <button class="tiny" title="Новая группа" disabled>
+        <button
+          class="tiny"
+          title="Новая группа"
+          onclick={() => {
+            newGroupName = "";
+            groupPrompt = true;
+          }}
+        >
           <Plus size={15} />
         </button>
       </div>
@@ -198,6 +231,13 @@
               {/each}
             </div>
             <button
+              class="edit"
+              title="Изменить"
+              onclick={() => (editing = server)}
+            >
+              <Pencil size={14} />
+            </button>
+            <button
               class="enter"
               title="Подключиться"
               onclick={() => connect(server)}
@@ -212,6 +252,40 @@
     </section>
   </div>
 </div>
+
+{#if editing}
+  <ServerEditor
+    server={editing === "new" ? null : editing}
+    groups={groups}
+    onClose={() => (editing = null)}
+    onSaved={async () => {
+      editing = null;
+      await onBookChanged();
+    }}
+    onDeleted={async () => {
+      editing = null;
+      await onBookChanged();
+    }}
+  />
+{/if}
+
+{#if groupPrompt}
+  <div class="overlay" onclick={() => (groupPrompt = false)}>
+    <div class="group-dialog" onclick={(e) => e.stopPropagation()}>
+      <div class="group-title">Новая группа</div>
+      <input
+        bind:value={newGroupName}
+        autofocus
+        placeholder="Название"
+        onkeydown={(e) => e.key === "Enter" && addGroup()}
+      />
+      <div class="group-foot">
+        <button class="gbtn" onclick={() => (groupPrompt = false)}>Отмена</button>
+        <button class="gbtn primary" onclick={addGroup}>Создать</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .page {
@@ -535,6 +609,89 @@
     background: var(--panel-subtle);
     color: var(--dim);
     font-size: 10.5px;
+  }
+
+  .edit {
+    display: grid;
+    place-items: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
+    color: var(--faint);
+    opacity: 0;
+  }
+
+  .server:hover .edit {
+    opacity: 1;
+  }
+
+  .edit:hover {
+    background: var(--selection);
+    color: var(--accent);
+  }
+
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(0, 0, 0, 0.4);
+    z-index: 90;
+  }
+
+  .group-dialog {
+    width: 360px;
+    padding: 16px 18px 12px;
+    background: var(--menu);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+  }
+
+  .group-title {
+    margin-bottom: 12px;
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .group-dialog input {
+    width: 100%;
+    height: 32px;
+    padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    color: var(--text);
+    outline: none;
+  }
+
+  .group-dialog input:focus {
+    border-color: var(--accent);
+  }
+
+  .group-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 14px;
+  }
+
+  .gbtn {
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--raised);
+    font-size: 12px;
+  }
+
+  .gbtn:hover {
+    background: var(--hover);
+  }
+
+  .gbtn.primary {
+    background: var(--accent);
+    border-color: transparent;
+    color: #fff;
+    font-weight: 600;
   }
 
   .enter {

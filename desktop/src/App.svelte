@@ -3,6 +3,7 @@
   import { Channel } from "@tauri-apps/api/core";
   import ConnectionsPage from "./pages/ConnectionsPage.svelte";
   import BrowserPage from "./pages/BrowserPage.svelte";
+  import SettingsPage from "./pages/SettingsPage.svelte";
   import TitleBar from "./lib/TitleBar.svelte";
   import { applyAppearance, setTheme } from "./lib/theme.svelte";
   import type { BrowserTab } from "./lib/browser";
@@ -26,6 +27,7 @@
   let tabs = $state<BrowserTab[]>([]);
   let activeTabId = $state("");
   let showConnections = $state(true);
+  let showSettings = $state(false);
   let transfers = $state<TransferEvent[]>([]);
 
   let error = $state<string | null>(null);
@@ -64,6 +66,10 @@
     }
   });
 
+  async function reloadBook() {
+    book = await api.listServers();
+  }
+
   async function loadLocal(path: string) {
     if (!path.trim()) return;
     try {
@@ -99,6 +105,7 @@
     }
     activeTabId = server.id;
     showConnections = false;
+    showSettings = false;
   }
 
   async function connect(server: Server, password: string | null = null) {
@@ -150,7 +157,21 @@
     connect(server, value.trim() ? value : null);
   }
 
-  async function download(remotePath: string, targetDir: string) {
+  async function closeTab(id: string) {
+    const tab = tabs.find((item) => item.id === id);
+    if (tab) await api.disconnect(tab.sessionId).catch(() => {});
+    tabs = tabs.filter((item) => item.id !== id);
+    if (activeTabId === id) {
+      activeTabId = tabs[0]?.id ?? "";
+      if (!tabs.length) showConnections = true;
+    }
+  }
+
+  async function transfer(
+    direction: "upload" | "download",
+    sourcePath: string,
+    targetDir: string,
+  ) {
     const tab = tabs.find((item) => item.id === activeTabId);
     if (!tab) return;
 
@@ -161,11 +182,46 @@
       else transfers = [event, ...transfers];
     };
 
+    const limit = settings?.transfer.bandwidthLimitKibps ?? 0;
+    const verify = (settings?.transfer.verifyChecksum ?? "off") !== "off";
+
     try {
-      await api.download(tab.sessionId, remotePath, targetDir, channel);
-      await loadLocal(targetDir);
+      await api.transferFile(
+        tab.sessionId,
+        direction,
+        sourcePath,
+        targetDir,
+        0,
+        limit,
+        verify,
+        null,
+        channel,
+      );
+      if (direction === "download") await loadLocal(targetDir);
+      else await loadRemote(tab.id, targetDir);
     } catch (e) {
-      error = `Скачивание: ${e}`;
+      error = `${direction === "download" ? "Скачивание" : "Загрузка"}: ${e}`;
+    }
+  }
+
+  async function cancelTransfer(id: string) {
+    await api.cancelTransfer(id).catch(() => {});
+  }
+
+  async function saveSettings(next: Settings) {
+    await api.saveSettings(next);
+    settings = await api.loadSettings();
+    const theme = settings?.window?.theme ?? "dark";
+    setTheme(
+      theme === "light" ? "light" : theme === "system" ? "system" : "dark",
+    );
+    applyAppearance(settings?.appearance);
+    showSettings = false;
+    notice = "Настройки сохранены";
+    if (local) await loadLocal(local.path);
+    if (tabs.length) {
+      const tab = tabs.find((item) => item.id === activeTabId);
+      if (tab?.listing) await loadRemote(tab.id, tab.listing.path);
     }
   }
 </script>
@@ -173,7 +229,23 @@
 <div class="app">
   <TitleBar />
 
-  {#if showConnections || tabs.length === 0}
+  {#if showSettings && settings}
+    <SettingsPage
+      {settings}
+      onClose={() => (showSettings = false)}
+      onSave={saveSettings}
+      onImported={async () => {
+        book = await api.listServers();
+        settings = await api.loadSettings();
+        const theme = settings?.window?.theme ?? "dark";
+        setTheme(
+          theme === "light" ? "light" : theme === "system" ? "system" : "dark",
+        );
+        applyAppearance(settings?.appearance);
+        if (local) await loadLocal(local.path);
+      }}
+    />
+  {:else if showConnections || tabs.length === 0}
     <ConnectionsPage
       {book}
       openTabs={tabs}
@@ -182,6 +254,8 @@
         activeTabId = id;
         showConnections = false;
       }}
+      onBookChanged={reloadBook}
+      onSettings={() => (showSettings = true)}
     />
   {:else}
     <BrowserPage
@@ -191,11 +265,14 @@
       {volumes}
       {transfers}
       onSelectTab={(id) => (activeTabId = id)}
+      onCloseTab={closeTab}
       onAddTab={() => (showConnections = true)}
       onBack={() => (showConnections = true)}
       onLocalPath={loadLocal}
       onRemotePath={loadRemote}
-      onDownload={download}
+      onTransfer={transfer}
+      onCancelTransfer={cancelTransfer}
+      onSettings={() => (showSettings = true)}
     />
   {/if}
 

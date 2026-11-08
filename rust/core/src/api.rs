@@ -2185,6 +2185,8 @@ const AI_KEY_IDS: [&str; 4] = [
     "ai_key_custom",
 ];
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProfileImportReport {
     pub servers: u32,
     pub groups: u32,

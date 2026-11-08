@@ -1,15 +1,17 @@
 <script lang="ts">
-  import { ChevronDown, ChevronUp, Download, List } from "lucide-svelte";
+  import { ChevronDown, ChevronUp, Download, List, X } from "lucide-svelte";
   import { formatBytes, type TransferEvent } from "./api";
 
   let {
     transfers = [],
     collapsed = false,
     onToggle,
+    onCancel,
   }: {
     transfers?: TransferEvent[];
     collapsed?: boolean;
     onToggle: () => void;
+    onCancel?: (id: string) => void;
   } = $props();
 
   const active = $derived(
@@ -74,6 +76,13 @@
             <span class="track"><span class="fill" style:width={`${percent(t)}%`}></span></span>
             <span class="pct">{percent(t)}%</span>
           </span>
+          {#if onCancel && (t.state === "running" || t.state === "queued")}
+            <button class="cancel" title="Отменить" onclick={() => onCancel(t.id)}>
+              <X size={12} />
+            </button>
+          {:else}
+            <span class="cancel-space"></span>
+          {/if}
         </div>
       {:else}
         <div class="empty">Нет активных передач</div>
@@ -250,6 +259,24 @@
 
   .state.error {
     background: var(--error);
+  }
+
+  .cancel {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 4px;
+    color: var(--faint);
+  }
+
+  .cancel:hover {
+    background: var(--selection);
+    color: var(--error);
+  }
+
+  .cancel-space {
+    width: 20px;
   }
 
   .empty {

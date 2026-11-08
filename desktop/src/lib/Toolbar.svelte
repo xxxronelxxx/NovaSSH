@@ -7,7 +7,6 @@
     Columns2,
     Copy,
     Diff,
-    Download,
     FilePenLine,
     FolderPlus,
     GitCompare,
@@ -23,27 +22,43 @@
 
   let {
     canUp = false,
-    canDownload = false,
+    canCopy = false,
+    canRename = false,
+    canDelete = false,
+    canEdit = false,
+    terminalOpen = false,
     filter = "",
     onBack,
     onUp,
     onRefresh,
-    onDownload,
-    onFilter,
+    onCopy,
+    onRename,
+    onDelete,
+    onMkdir,
+    onEdit,
+    onTerminal,
     onSettings,
+    onFilter,
   }: {
     canUp?: boolean;
-    canDownload?: boolean;
+    canCopy?: boolean;
+    canRename?: boolean;
+    canDelete?: boolean;
+    canEdit?: boolean;
+    terminalOpen?: boolean;
     filter?: string;
     onBack: () => void;
     onUp: () => void;
     onRefresh: () => void;
-    onDownload: () => void;
-    onFilter: (value: string) => void;
+    onCopy: () => void;
+    onRename: () => void;
+    onDelete: () => void;
+    onMkdir: () => void;
+    onEdit: () => void;
+    onTerminal: () => void;
     onSettings?: () => void;
+    onFilter: (value: string) => void;
   } = $props();
-
-  let filterInput: HTMLInputElement | undefined = $state();
 </script>
 
 <div class="toolbar">
@@ -62,7 +77,7 @@
 
   <span class="sep"></span>
 
-  <button class="tool" title="Копировать (F5)" disabled>
+  <button class="tool" title="Копировать (F5)" disabled={!canCopy} onclick={onCopy}>
     <Copy size={16} />
   </button>
   <button class="tool" title="Сравнить файлы (Ctrl+F3)" disabled>
@@ -83,29 +98,26 @@
 
   <span class="sep"></span>
 
-  <button class="tool" title="Переименовать (F2)" disabled>
+  <button class="tool" title="Переименовать (F2)" disabled={!canRename} onclick={onRename}>
     <PencilLine size={16} />
   </button>
   <button class="tool" title="Массовое переименование" disabled>
     <ListChecks size={16} />
   </button>
-  <button class="tool" title="Новая папка (F7)" disabled>
+  <button class="tool" title="Новая папка (F7)" onclick={onMkdir}>
     <FolderPlus size={16} />
   </button>
-  <button class="tool" title="Удалить (F8)" disabled>
+  <button class="tool" title="Удалить (F8)" disabled={!canDelete} onclick={onDelete}>
     <Trash2 size={16} />
   </button>
 
   <span class="sep"></span>
 
-  <button class="tool" title="Терминал" disabled>
+  <button class="tool" class:accent={terminalOpen} title="Терминал" onclick={onTerminal}>
     <SquareTerminal size={16} />
   </button>
-  <button class="tool" title="Редактор (F4)" disabled>
+  <button class="tool" title="Редактор (F4)" disabled={!canEdit} onclick={onEdit}>
     <FilePenLine size={16} />
-  </button>
-  <button class="tool" title="Скачать выбранное" disabled={!canDownload} onclick={onDownload}>
-    <Download size={16} />
   </button>
   <button class="tool" title="Настройки" disabled={!onSettings} onclick={onSettings}>
     <Settings2 size={16} />
@@ -116,7 +128,6 @@
   <label class="filter">
     <Search size={14} />
     <input
-      bind:this={filterInput}
       value={filter}
       placeholder="Фильтр по имени"
       spellcheck="false"
@@ -152,6 +163,11 @@
   .tool:disabled {
     opacity: 0.48;
     cursor: default;
+  }
+
+  .tool.accent {
+    background: var(--selection);
+    color: var(--accent);
   }
 
   .sep {

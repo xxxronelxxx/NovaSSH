@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { HardDrive, Network, PanelLeft, Plus } from "lucide-svelte";
+  import { HardDrive, Network, PanelLeft, Plus, X } from "lucide-svelte";
   import FileIcon from "./FileIcon.svelte";
   import {
     formatBytes,
@@ -26,6 +26,8 @@
     filter = "",
     canAdd = false,
     onSelectTab,
+    onCloseTab,
+    onContextMenu,
     onAdd,
     onUp,
     onRefresh,
@@ -43,6 +45,8 @@
     filter?: string;
     canAdd?: boolean;
     onSelectTab: (id: string) => void;
+    onCloseTab?: (id: string) => void;
+    onContextMenu?: (entry: Entry | null, event: MouseEvent) => void;
     onAdd: () => void;
     onUp: () => void;
     onRefresh: () => void;
@@ -103,19 +107,28 @@
       <PanelLeft size={15} />
     </span>
     {#each tabs as tab (tab.id)}
-      <button
-        class="tab"
-        class:active={tab.id === activeTab}
-        title={tab.hint ?? tab.label}
-        onclick={() => onSelectTab(tab.id)}
-      >
-        {#if variant === "remote"}
-          <Network size={14} />
-        {:else}
-          <HardDrive size={14} />
+      <div class="tab" class:active={tab.id === activeTab} title={tab.hint ?? tab.label}>
+        <button class="tab-label" onclick={() => onSelectTab(tab.id)}>
+          {#if variant === "remote"}
+            <Network size={14} />
+          {:else}
+            <HardDrive size={14} />
+          {/if}
+          <span>{tab.label}</span>
+        </button>
+        {#if variant === "remote" && onCloseTab}
+          <button
+            class="tab-close"
+            title="Закрыть вкладку"
+            onclick={(e) => {
+              e.stopPropagation();
+              onCloseTab(tab.id);
+            }}
+          >
+            <X size={11} />
+          </button>
         {/if}
-        <span>{tab.label}</span>
-      </button>
+      </div>
     {/each}
     {#if canAdd}
       <button class="add" title="Добавить сервер" onclick={onAdd}>
@@ -140,7 +153,13 @@
     <span class="col date">Изменён</span>
   </div>
 
-  <div class="rows" onwheel={() => {}}>
+  <div
+    class="rows"
+    oncontextmenu={(event) => {
+      event.preventDefault();
+      onContextMenu?.(null, event);
+    }}
+  >
     {#if listing?.parent}
       <button class="row" ondblclick={onUp} title="На уровень выше">
         <span class="parent-ico">↩</span>
@@ -157,6 +176,12 @@
         class:selected={selected === entry.path}
         onpointerdown={() => onSelect(entry)}
         ondblclick={() => onOpen(entry)}
+        oncontextmenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onSelect(entry);
+          onContextMenu?.(entry, event);
+        }}
       >
         <FileIcon entry={entry} />
         <span class="name" class:hidden={entry.hidden}>{entry.name}</span>
@@ -216,21 +241,30 @@
   .tab {
     display: flex;
     align-items: center;
-    gap: 7px;
     height: 29px;
     margin-bottom: 3px;
-    padding: 0 11px;
+    padding: 0 4px 0 2px;
     border: 1px solid transparent;
     border-bottom: 0;
     border-radius: 6px 6px 0 0;
     color: var(--dim);
     font-size: 12px;
-    max-width: 190px;
+    max-width: 210px;
     overflow: hidden;
     white-space: nowrap;
   }
 
-  .tab span {
+  .tab-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 100%;
+    min-width: 0;
+    padding: 0 7px;
+    color: inherit;
+  }
+
+  .tab-label span {
     overflow: hidden;
     text-overflow: ellipsis;
   }
@@ -248,6 +282,26 @@
 
   .tab.active svg {
     color: var(--accent);
+  }
+
+  .tab-close {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    color: var(--faint);
+    opacity: 0;
+  }
+
+  .tab:hover .tab-close,
+  .tab.active .tab-close {
+    opacity: 1;
+  }
+
+  .tab-close:hover {
+    background: var(--selection);
+    color: var(--text);
   }
 
   .add {
