@@ -11,6 +11,7 @@
     api,
     type AppInfo,
     type DirListing,
+    type OpenSession,
     type Server,
     type ServerBook,
     type Settings,
@@ -33,6 +34,9 @@
   let error = $state<string | null>(null);
   let notice = $state<string | null>(null);
 
+  let restoreList = $state<OpenSession[]>([]);
+  let restoreHidden = $state(false);
+
   let connecting = $state<{ server: Server; stage: number } | null>(null);
   let passwordPrompt = $state<Server | null>(null);
   let passwordError = $state<string | null>(null);
@@ -44,6 +48,19 @@
     "Аутентификация…",
     "Открываю SFTP-сессию…",
   ];
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("error", (event) => {
+      void api
+        .uiLog(`ERROR ${event.message} @ ${event.filename}:${event.lineno}`)
+        .catch(() => {});
+    });
+    window.addEventListener("unhandledrejection", (event) => {
+      void api
+        .uiLog(`REJECTION ${String(event.reason)}`)
+        .catch(() => {});
+    });
+  }
 
   onMount(async () => {
     try {
@@ -61,6 +78,12 @@
       volumes = await api.volumes().catch(() => []);
       const home = await api.homeLocal();
       await loadLocal(home);
+
+      const state = await api.loadSessionState().catch(() => null);
+      const ids = new Set((book?.servers ?? []).map((server) => server.id));
+      restoreList = (state?.openSessions ?? []).filter((item) =>
+        ids.has(item.serverId),
+      );
     } catch (e) {
       error = `Инициализация: ${e}`;
     }
@@ -73,7 +96,8 @@
   async function loadLocal(path: string) {
     if (!path.trim()) return;
     try {
-      local = await api.listLocal(path);
+      local = await api.listLocal(path, settings?.panels?.showHidden ?? true);
+      schedulePersist();
     } catch (e) {
       error = `Локально: ${e}`;
     }
@@ -83,8 +107,15 @@
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab || !path.trim()) return;
     try {
-      tab.listing = await api.listRemote(tab.sessionId, path);
+      tab.listing = await api.listRemote(
+        tab.sessionId,
+        path,
+        settings?.panels?.showHidden ?? true,
+      );
+      tab.disconnected = false;
+      schedulePersist();
     } catch (e) {
+      tab.disconnected = true;
       error = `Сервер: ${e}`;
     }
   }
@@ -108,7 +139,39 @@
     showSettings = false;
   }
 
-  async function connect(server: Server, password: string | null = null) {
+  let persistTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function schedulePersist() {
+    if (persistTimer) clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      void persistSessions();
+    }, 600);
+  }
+
+  async function persistSessions() {
+    if (!tabs.length) {
+      await api.saveOpenSessions([]).catch(() => {});
+      return;
+    }
+    const localPath = local?.path ?? "";
+    await api
+      .saveOpenSessions(
+        tabs.map((tab) => ({
+          serverId: tab.server.id,
+          name: tab.label,
+          localPath,
+          remotePath: tab.listing?.path ?? "",
+        })),
+      )
+      .catch(() => {});
+  }
+
+  async function connect(
+    server: Server,
+    password: string | null = null,
+    restore: OpenSession | null = null,
+  ) {
     error = null;
     notice = null;
     passwordPrompt = null;
@@ -126,8 +189,24 @@
     try {
       const result = await api.connectServer(server.id, password);
       addTab(server, result.sessionId);
-      await loadRemote(server.id, result.startPath);
+      if (restore) {
+        if (restore.localPath) await loadLocal(restore.localPath);
+        await loadRemote(
+          server.id,
+          restore.remotePath || result.startPath,
+        );
+        await api
+          .rememberSession(
+            server.id,
+            restore.remotePath || result.startPath,
+            restore.localPath || local?.path || "",
+          )
+          .catch(() => {});
+      } else {
+        await loadRemote(server.id, result.startPath);
+      }
       if (result.warnings.length) notice = result.warnings.join(" · ");
+      await persistSessions();
     } catch (e) {
       const message = String(e);
       if (/отменено|cancelled/i.test(message)) {
@@ -157,6 +236,30 @@
     connect(server, value.trim() ? value : null);
   }
 
+  async function reconnectTab(id: string) {
+    const tab = tabs.find((item) => item.id === id);
+    if (!tab) return;
+    await api.disconnect(tab.sessionId).catch(() => {});
+    connecting = { server: tab.server, stage: 0 };
+    try {
+      const result = await api.connectServer(tab.server.id, null);
+      tab.sessionId = result.sessionId;
+      tab.disconnected = false;
+      await loadRemote(id, tab.listing?.path || result.startPath);
+    } catch (e) {
+      const message = String(e);
+      if (/password|пароль|auth|аутентиф/i.test(message)) {
+        passwordPrompt = tab.server;
+        passwordError = message;
+        passwordInput = "";
+      } else {
+        error = `Переподключение: ${message}`;
+      }
+    } finally {
+      connecting = null;
+    }
+  }
+
   async function closeTab(id: string) {
     const tab = tabs.find((item) => item.id === id);
     if (tab) await api.disconnect(tab.sessionId).catch(() => {});
@@ -165,47 +268,184 @@
       activeTabId = tabs[0]?.id ?? "";
       if (!tabs.length) showConnections = true;
     }
+    await persistSessions();
   }
 
-  async function transfer(
+  async function restoreSessions() {
+    const list = restoreList;
+    restoreHidden = true;
+    restoreList = [];
+    for (const item of list) {
+      const server = (book?.servers ?? []).find((s) => s.id === item.serverId);
+      if (!server) continue;
+      await connect(server, null, item);
+    }
+  }
+
+  interface TransferJob {
+    id: string;
+    tabId: string;
+    sessionId: string;
+    direction: "upload" | "download";
+    sourcePath: string;
+    targetDir: string;
+  }
+
+  let queue: TransferJob[] = [];
+  let activeTransfers = 0;
+  let conflict = $state<{
+    name: string;
+    resolve: (choice: "overwrite" | "skip" | "cancel") => void;
+  } | null>(null);
+
+  function baseName(path: string): string {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? path;
+  }
+
+  function askConflict(name: string): Promise<"overwrite" | "skip" | "cancel"> {
+    return new Promise((resolve) => {
+      conflict = { name, resolve };
+    });
+  }
+
+  function resolveConflict(choice: "overwrite" | "skip" | "cancel") {
+    const current = conflict;
+    if (!current) return;
+    conflict = null;
+    current.resolve(choice);
+  }
+
+  function transfer(
     direction: "upload" | "download",
     sourcePath: string,
     targetDir: string,
   ) {
     const tab = tabs.find((item) => item.id === activeTabId);
     if (!tab) return;
+    queue.push({
+      id: `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      tabId: tab.id,
+      sessionId: tab.sessionId,
+      direction,
+      sourcePath,
+      targetDir,
+    });
+    void pumpTransfers();
+  }
+
+  async function pumpTransfers() {
+    const limit = Math.max(1, Math.min(8, settings?.transfer.concurrency ?? 3));
+    while (activeTransfers < limit && queue.length) {
+      const job = queue.shift();
+      if (!job) break;
+      activeTransfers += 1;
+      void runTransfer(job).finally(() => {
+        activeTransfers -= 1;
+        void pumpTransfers();
+      });
+    }
+  }
+
+  async function existingTarget(
+    job: TransferJob,
+    name: string,
+  ): Promise<number | null> {
+    try {
+      if (job.direction === "upload") {
+        const listing = await api.listRemote(
+          job.sessionId,
+          job.targetDir,
+          settings?.panels?.showHidden ?? true,
+        );
+        const found = listing.entries.find((entry) => entry.name === name);
+        return found ? found.size : null;
+      }
+      const listing = await api.listLocal(job.targetDir);
+      const found = listing.entries.find((entry) => entry.name === name);
+      return found ? found.size : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function runTransfer(job: TransferJob) {
+    const name = baseName(job.sourcePath);
+    const exists = await existingTarget(job, name);
+    let resumeFrom = 0;
+    let targetName: string | null = null;
+    if (exists != null) {
+      const policy = settings?.transfer.conflictPolicy ?? "ask";
+      if (policy === "skip") return;
+      if (policy === "ask") {
+        const choice = await askConflict(name);
+        if (choice === "skip") return;
+        if (choice === "cancel") return;
+      }
+      if (policy === "rename") {
+        const dot = name.lastIndexOf(".");
+        const stem = dot > 0 ? name.slice(0, dot) : name;
+        const ext = dot > 0 ? name.slice(dot) : "";
+        for (let index = 2; index < 100; index += 1) {
+          const candidate = `${stem} (${index})${ext}`;
+          if ((await existingTarget(job, candidate)) == null) {
+            targetName = candidate;
+            break;
+          }
+        }
+        if (!targetName) targetName = `${stem} (${Date.now()})${ext}`;
+      } else if (settings?.transfer.resume) {
+        resumeFrom = exists;
+      }
+    }
 
     const channel = new Channel<TransferEvent>();
-    channel.onmessage = (event) => {
-      const index = transfers.findIndex((item) => item.id === event.id);
-      if (index >= 0) transfers[index] = event;
-      else transfers = [event, ...transfers];
-    };
+    channel.onmessage = (event) => trackTransfer(event);
 
     const limit = settings?.transfer.bandwidthLimitKibps ?? 0;
     const verify = (settings?.transfer.verifyChecksum ?? "off") !== "off";
 
     try {
       await api.transferFile(
-        tab.sessionId,
-        direction,
-        sourcePath,
-        targetDir,
-        0,
+        job.sessionId,
+        job.direction,
+        job.sourcePath,
+        job.targetDir,
+        resumeFrom,
         limit,
         verify,
-        null,
+        targetName,
         channel,
       );
-      if (direction === "download") await loadLocal(targetDir);
-      else await loadRemote(tab.id, targetDir);
+      if (job.direction === "download") {
+        if (local?.path === job.targetDir) await loadLocal(job.targetDir);
+      } else {
+        const tab = tabs.find((item) => item.id === job.tabId);
+        if (tab?.listing?.path === job.targetDir) {
+          await loadRemote(job.tabId, job.targetDir);
+        }
+      }
     } catch (e) {
-      error = `${direction === "download" ? "Скачивание" : "Загрузка"}: ${e}`;
+      error = `${job.direction === "download" ? "Скачивание" : "Загрузка"}: ${e}`;
     }
   }
 
+  function cancelConflict() {
+    resolveConflict("cancel");
+    queue = [];
+  }
+
+  function trackTransfer(event: TransferEvent) {
+    const index = transfers.findIndex((item) => item.id === event.id);
+    if (index >= 0) transfers[index] = event;
+    else transfers = [event, ...transfers];
+  }
+
   async function cancelTransfer(id: string) {
+    // A archиве job and a regular transfer share the panel; both calls are
+    // harmless when the id belongs to the other kind.
     await api.cancelTransfer(id).catch(() => {});
+    await api.cancelArchiveJob(id).catch(() => {});
   }
 
   async function saveSettings(next: Settings) {
@@ -249,6 +489,12 @@
     <ConnectionsPage
       {book}
       openTabs={tabs}
+      restore={restoreHidden ? [] : restoreList}
+      onRestore={restoreSessions}
+      onHideRestore={() => {
+        restoreHidden = true;
+        restoreList = [];
+      }}
       onConnect={(server) => connect(server)}
       onOpenTab={(id) => {
         activeTabId = id;
@@ -262,18 +508,44 @@
       {tabs}
       {activeTabId}
       {local}
+      {settings}
       {volumes}
       {transfers}
       onSelectTab={(id) => (activeTabId = id)}
       onCloseTab={closeTab}
       onAddTab={() => (showConnections = true)}
-      onBack={() => (showConnections = true)}
+      onBack={() => {
+        showConnections = true;
+        void persistSessions();
+      }}
       onLocalPath={loadLocal}
       onRemotePath={loadRemote}
+      onReconnect={reconnectTab}
       onTransfer={transfer}
       onCancelTransfer={cancelTransfer}
+      onTrackTransfer={trackTransfer}
       onSettings={() => (showSettings = true)}
     />
+  {/if}
+
+  {#if conflict}
+    <div class="overlay">
+      <div class="dialog">
+        <div class="dialog-title">Файл уже существует</div>
+        <div class="conflict-name">{conflict.name}</div>
+        <div class="dialog-foot">
+          <button class="btn" onclick={() => resolveConflict("cancel")}>
+            Отмена
+          </button>
+          <button class="btn" onclick={() => resolveConflict("skip")}>
+            Пропустить
+          </button>
+          <button class="btn primary" onclick={() => resolveConflict("overwrite")}>
+            Перезаписать
+          </button>
+        </div>
+      </div>
+    </div>
   {/if}
 
   {#if connecting}
@@ -435,6 +707,13 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  .conflict-name {
+    margin-bottom: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+    word-break: break-all;
   }
 
   .dialog-foot {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { HardDrive, Network, PanelLeft, Plus, X } from "lucide-svelte";
   import FileIcon from "./FileIcon.svelte";
   import {
@@ -6,8 +7,10 @@
     formatDate,
     formatMode,
     sortEntries,
+    type ColorRule,
     type DirListing,
     type Entry,
+    api,
   } from "./api";
 
   export interface PaneTab {
@@ -21,10 +24,12 @@
     tabs,
     activeTab,
     listing,
-    selected = null,
+    selected = [],
     focused = false,
     filter = "",
     canAdd = false,
+    rootLabel,
+    otherNames,
     onSelectTab,
     onCloseTab,
     onContextMenu,
@@ -40,10 +45,12 @@
     tabs: PaneTab[];
     activeTab: string;
     listing: DirListing | null;
-    selected?: string | null;
+    selected?: string[];
     focused?: boolean;
     filter?: string;
     canAdd?: boolean;
+    rootLabel?: string;
+    otherNames?: Set<string>;
     onSelectTab: (id: string) => void;
     onCloseTab?: (id: string) => void;
     onContextMenu?: (entry: Entry | null, event: MouseEvent) => void;
@@ -51,20 +58,158 @@
     onUp: () => void;
     onRefresh: () => void;
     onPath: (path: string) => void;
-    onSelect: (entry: Entry) => void;
+    onSelect: (entry: Entry, mode: "single" | "toggle" | "range") => void;
     onOpen: (entry: Entry) => void;
     onFocus: () => void;
+    onDrop?: (source: "local" | "remote", paths: string[]) => void;
   } = $props();
+
+  let anchor = $state<string | null>(null);
+  let rules = $state<ColorRule[]>([]);
+  let sortKey = $state<"name" | "size" | "mode" | "modified">("name");
+  let sortAsc = $state(true);
+  let dragOver = $state(false);
+
+  const selectedSet = $derived(new Set(selected));
+
+  onMount(async () => {
+    try {
+      const book = await api.loadColorRules();
+      rules = book.rules
+        .filter(
+          (rule) =>
+            rule.enabled &&
+            (rule.scope === "both" || rule.scope === variant),
+        )
+        .sort((a, b) => b.priority - a.priority);
+    } catch {
+      rules = [];
+    }
+  });
+
+  function ruleColor(style: string): string | null {
+    const found = /(?:^|;)color:([^;]+)/.exec(style);
+    return found ? found[1] : null;
+  }
+
+  function matches(rule: ColorRule, name: string): boolean {
+    if (rule.isRegex) {
+      try {
+        return new RegExp(rule.pattern, "i").test(name);
+      } catch {
+        return false;
+      }
+    }
+    const escaped = rule.pattern
+      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*/g, ".*")
+      .replace(/\?/g, ".");
+    try {
+      return new RegExp(`^${escaped}$`, "i").test(name);
+    } catch {
+      return false;
+    }
+  }
+
+  function ruleStyle(entry: Entry): string | null {
+    for (const rule of rules) {
+      if (!matches(rule, entry.name)) continue;
+      const parts: string[] = [];
+      if (rule.fg) parts.push(`color:${rule.fg}`);
+      if (rule.bg) parts.push(`background:${rule.bg}`);
+      if (rule.bold) parts.push("font-weight:700");
+      if (rule.italic) parts.push("font-style:italic");
+      if (rule.underline) parts.push("text-decoration:underline");
+      return parts.length ? parts.join(";") : null;
+    }
+    return null;
+  }
+
+  function sortValue(entry: Entry): string | number {
+    switch (sortKey) {
+      case "size":
+        return entry.size;
+      case "mode":
+        return entry.mode ?? 0;
+      case "modified":
+        return entry.modified;
+      default:
+        return entry.name.toLocaleLowerCase("ru");
+    }
+  }
+
+  function toggleSort(key: "name" | "size" | "mode" | "modified") {
+    if (sortKey === key) sortAsc = !sortAsc;
+    else {
+      sortKey = key;
+      sortAsc = key === "name";
+    }
+  }
+
+  const sortMark = $derived((key: string) =>
+    sortKey === key ? (sortAsc ? " ↑" : " ↓") : "",
+  );
 
   const lowerFilter = $derived(filter.trim().toLowerCase());
 
   const entries = $derived.by(() => {
-    const list = sortEntries(listing?.entries ?? []);
+    const list = [...(listing?.entries ?? [])].sort((a, b) => {
+      const dir = Number(b.kind === "dir") - Number(a.kind === "dir");
+      if (dir) return dir;
+      const left = sortValue(a);
+      const right = sortValue(b);
+      const result =
+        typeof left === "number" && typeof right === "number"
+          ? left - right
+          : String(left).localeCompare(String(right), "ru", {
+              sensitivity: "base",
+            });
+      return sortAsc ? result : -result;
+    });
     if (!lowerFilter) return list;
     return list.filter((entry) =>
       entry.name.toLowerCase().includes(lowerFilter),
     );
   });
+
+  function handleSelect(entry: Entry, event: PointerEvent | MouseEvent) {
+    if (event.shiftKey && anchor) {
+      onSelect(entry, "range");
+    } else if (event.ctrlKey || event.metaKey) {
+      anchor = entry.path;
+      onSelect(entry, "toggle");
+    } else {
+      anchor = entry.path;
+      onSelect(entry, "single");
+    }
+  }
+
+  function startDrag(entry: Entry, event: DragEvent) {
+    const paths = selectedSet.has(entry.path) ? [...selected] : [entry.path];
+    event.dataTransfer?.setData(
+      "application/x-nova-paths",
+      JSON.stringify({ source: variant, paths }),
+    );
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = "copy";
+  }
+
+  function handleDrop(event: DragEvent) {
+    dragOver = false;
+    const raw = event.dataTransfer?.getData("application/x-nova-paths");
+    if (!raw) return;
+    event.preventDefault();
+    try {
+      const payload = JSON.parse(raw) as {
+        source: "local" | "remote";
+        paths: string[];
+      };
+      if (Array.isArray(payload.paths) && payload.paths.length) {
+        onDrop?.(payload.source, payload.paths);
+      }
+    } catch {
+      // ignore malformed payloads
+    }
+  }
 
   interface Crumb {
     label: string;
@@ -74,6 +219,16 @@
   const crumbs = $derived.by((): Crumb[] => {
     const path = listing?.path ?? "";
     if (!path) return [];
+    if (rootLabel) {
+      const parts = path.split("/").filter(Boolean);
+      const result: Crumb[] = [{ label: rootLabel, value: "" }];
+      let acc = "";
+      for (const part of parts) {
+        acc += `/${part}`;
+        result.push({ label: part, value: acc });
+      }
+      return result;
+    }
     if (/^[A-Za-z]:/.test(path)) {
       const parts = path.replace(/\\/g, "/").split("/").filter(Boolean);
       let acc = "";
@@ -100,6 +255,8 @@
 <section
   class="pane"
   class:focused
+  class:drag-over={dragOver}
+  data-pane={variant}
   onpointerdown={onFocus}
 >
   <div class="tabs">
@@ -147,20 +304,36 @@
   </div>
 
   <div class="head">
-    <span class="col name">Имя <span class="sort">↑</span></span>
-    <span class="col size">Размер</span>
-    <span class="col perms">Права</span>
-    <span class="col date">Изменён</span>
+    <button class="col name" onclick={() => toggleSort("name")}>
+      Имя <span class="sort">{sortMark("name")}</span>
+    </button>
+    <button class="col size" onclick={() => toggleSort("size")}>
+      Размер<span class="sort">{sortMark("size")}</span>
+    </button>
+    <button class="col perms" onclick={() => toggleSort("mode")}>
+      Права<span class="sort">{sortMark("mode")}</span>
+    </button>
+    <button class="col date" onclick={() => toggleSort("modified")}>
+      Изменён<span class="sort">{sortMark("modified")}</span>
+    </button>
   </div>
 
   <div
     class="rows"
+    ondragover={(event) => {
+      if (event.dataTransfer?.types.includes("application/x-nova-paths")) {
+        event.preventDefault();
+        dragOver = true;
+      }
+    }}
+    ondragleave={() => (dragOver = false)}
+    ondrop={handleDrop}
     oncontextmenu={(event) => {
       event.preventDefault();
       onContextMenu?.(null, event);
     }}
   >
-    {#if listing?.parent}
+    {#if listing?.parent || rootLabel}
       <button class="row" ondblclick={onUp} title="На уровень выше">
         <span class="parent-ico">↩</span>
         <span class="name parent-name">..</span>
@@ -171,20 +344,28 @@
     {/if}
 
     {#each entries as entry (entry.path)}
+      {@const style = ruleStyle(entry)}
       <button
         class="row"
-        class:selected={selected === entry.path}
-        onpointerdown={() => onSelect(entry)}
+        class:selected={selectedSet.has(entry.path)}
+        class:only-here={!!otherNames && !otherNames.has(entry.name)}
+        draggable="true"
+        ondragstart={(event) => startDrag(entry, event)}
+        onpointerdown={(event) => {
+          if (event.button === 0) handleSelect(entry, event);
+        }}
         ondblclick={() => onOpen(entry)}
         oncontextmenu={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          onSelect(entry);
+          if (!selectedSet.has(entry.path)) {
+            handleSelect(entry, event);
+          }
           onContextMenu?.(entry, event);
         }}
       >
-        <FileIcon entry={entry} />
-        <span class="name" class:hidden={entry.hidden}>{entry.name}</span>
+        <FileIcon entry={entry} override={style ? ruleColor(style) : null} />
+        <span class="name" class:hidden={entry.hidden} style={style ?? ""}>{entry.name}</span>
         <span class="size">{entry.kind === "dir" ? "" : formatBytes(entry.size)}</span>
         <span class="perms">{formatMode(entry.mode)}</span>
         <span class="date">{formatDate(entry.modified)}</span>
@@ -216,6 +397,11 @@
 
   .pane.focused {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  }
+
+  .pane.drag-over {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px var(--accent);
   }
 
   .tabs {
@@ -370,6 +556,16 @@
 
   .col {
     flex: 0 0 auto;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--faint);
+    font-size: 11px;
+    text-align: left;
+  }
+
+  button.col:hover {
+    color: var(--text);
   }
 
   .col.name {
@@ -412,6 +608,10 @@
     padding: 0 10px;
     text-align: left;
     font-size: var(--row-font);
+  }
+
+  .row.only-here .name {
+    color: var(--accent);
   }
 
   .row:hover {

@@ -1,9 +1,20 @@
 <script lang="ts">
   import { open, save } from "@tauri-apps/plugin-dialog";
-  import { X } from "lucide-svelte";
+  import { Plus, Trash2, X } from "lucide-svelte";
+  import { onMount } from "svelte";
+  import LogsDialog from "../lib/LogsDialog.svelte";
+  import SnippetsDialog from "../lib/SnippetsDialog.svelte";
+  import SyncShareCard from "../lib/SyncShareCard.svelte";
   import {
     api,
+    type AiModel,
+    type AiSettings,
+    type ColorRule,
+    type ColorRules,
+    type LogSettings,
     type Settings,
+    type AppInfo,
+    type WinscpImportReport,
   } from "../lib/api";
   import { applyAppearance, setTheme } from "../lib/theme.svelte";
 
@@ -20,21 +31,131 @@
   } = $props();
 
   let s = $state<Settings>(JSON.parse(JSON.stringify(settings)));
-  let tab = $state<"appearance" | "panels" | "transfer" | "editor" | "profile">(
-    "appearance",
-  );
+  let tab = $state<
+    | "appearance"
+    | "panels"
+    | "transfer"
+    | "editor"
+    | "colors"
+    | "logs"
+    | "ai"
+    | "import"
+    | "sync"
+    | "profile"
+    | "about"
+  >("appearance");
   let busy = $state(false);
   let error = $state<string | null>(null);
   let profileText = $state<string | null>(null);
   let importPrompt = $state(false);
   let pendingImport = $state<string | null>(null);
 
+  let ai = $state<AiSettings | null>(null);
+  let aiKey = $state("");
+  let aiModels = $state<AiModel[]>([]);
+  let aiBusy = $state(false);
+  let aiError = $state<string | null>(null);
+  let aiSaved = $state<string | null>(null);
+
+  let rules = $state<ColorRules | null>(null);
+  let rulesSaved = $state<string | null>(null);
+  let ruleDraft = $state<ColorRule | null>(null);
+
+  let logSettings = $state<LogSettings | null>(null);
+  let logsOpen = $state(false);
+  let snippetsOpen = $state(false);
+
+  let winscpPath = $state("");
+  let winscpReport = $state<WinscpImportReport | null>(null);
+  let winscpError = $state<string | null>(null);
+  let winscpBusy = $state(false);
+  let toast = $state<string | null>(null);
+  let info = $state<AppInfo | null>(null);
+
+  const providers: Record<string, { label: string; endpoint: string }> = {
+    zen: { label: "OpenCode Zen", endpoint: "https://opencode.ai/zen/v1" },
+    go: {
+      label: "OpenCode Go",
+      endpoint: "https://opencode.ai/inference/go/openai/v1",
+    },
+    openrouter: {
+      label: "OpenRouter",
+      endpoint: "https://openrouter.ai/api/v1",
+    },
+    custom: { label: "Свой endpoint", endpoint: "" },
+  };
+
+  onMount(async () => {
+    try {
+      ai = await api.loadAiSettings();
+      aiKey = (await api.getSecret(`ai_key_${ai.provider}`)) ?? "";
+    } catch (e) {
+      aiError = String(e);
+    }
+    info = await api.vaultInfo().catch(() => null);
+    rules = await api.loadColorRules().catch(() => null);
+    logSettings = await api.loadLogSettings().catch(() => null);
+  });
+
+  async function changeProvider(provider: string) {
+    if (!ai) return;
+    ai.provider = provider;
+    const preset = providers[provider];
+    if (preset && preset.endpoint) ai.endpoint = preset.endpoint;
+    aiModels = [];
+    try {
+      aiKey = (await api.getSecret(`ai_key_${provider}`)) ?? "";
+    } catch {
+      aiKey = "";
+    }
+  }
+
+  async function loadAiModels() {
+    if (!ai) return;
+    aiBusy = true;
+    aiError = null;
+    try {
+      aiModels = await api.aiModels(ai.endpoint, aiKey);
+      if (!aiModels.some((model) => model.id === ai!.model)) {
+        ai.model = aiModels[0]?.id ?? ai.model;
+      }
+    } catch (e) {
+      aiError = String(e);
+    } finally {
+      aiBusy = false;
+    }
+  }
+
+  async function saveAi() {
+    if (!ai) return;
+    aiBusy = true;
+    aiError = null;
+    aiSaved = null;
+    try {
+      await api.saveAiSettings(ai);
+      if (aiKey.trim()) {
+        await api.setSecret(`ai_key_${ai.provider}`, aiKey.trim());
+      }
+      aiSaved = "Сохранено";
+    } catch (e) {
+      aiError = String(e);
+    } finally {
+      aiBusy = false;
+    }
+  }
+
   const tabs = [
     ["appearance", "Внешний вид"],
     ["panels", "Панели"],
     ["transfer", "Передачи"],
     ["editor", "Редактор и терминал"],
+    ["colors", "Цвета файлов"],
+    ["logs", "Журнал"],
+    ["ai", "ИИ"],
+    ["import", "Импорт WinSCP"],
+    ["sync", "Синхронизация"],
     ["profile", "Профиль"],
+    ["about", "О программе"],
   ] as const;
 
   const uiFonts = ["", "Segoe UI", "Tahoma", "Verdana", "Arial", "Inter", "Roboto"];
@@ -89,6 +210,85 @@
 
   async function showCredentials() {
     profileText = await api.credentialsPreview();
+  }
+
+  async function saveRules(next: ColorRules) {
+    rules = next;
+    await api.saveColorRules(next);
+    rulesSaved = "Правила сохранены";
+    setTimeout(() => (rulesSaved = null), 1800);
+  }
+
+  function addRule() {
+    ruleDraft = {
+      id: `rule_${Date.now()}`,
+      name: "Новое правило",
+      enabled: true,
+      priority: 10,
+      scope: "both",
+      pattern: "*.log",
+      isRegex: false,
+      fg: "#FF7B72",
+      bg: null,
+      bold: false,
+      italic: false,
+      underline: false,
+    };
+  }
+
+  async function commitRule() {
+    const draft = ruleDraft;
+    if (!draft || !rules) return;
+    ruleDraft = null;
+    if (!draft.name.trim() || !draft.pattern.trim()) return;
+    await saveRules({ ...rules, rules: [...rules.rules, draft] });
+  }
+
+  async function updateRule(index: number, patch: Partial<ColorRule>) {
+    if (!rules) return;
+    const next = rules.rules.map((rule, position) =>
+      position === index ? { ...rule, ...patch } : rule,
+    );
+    await saveRules({ ...rules, rules: next });
+  }
+
+  async function removeRule(index: number) {
+    if (!rules) return;
+    await saveRules({
+      ...rules,
+      rules: rules.rules.filter((_, position) => position !== index),
+    });
+  }
+
+  async function toggleEditLog(value: boolean) {
+    if (!logSettings) return;
+    logSettings = { ...logSettings, editLog: value };
+    await api.saveLogSettings(logSettings).catch(() => {});
+  }
+
+  async function pickWinscp() {
+    const path = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Конфигурация WinSCP", extensions: ["ini"] }],
+    });
+    if (!path || Array.isArray(path)) return;
+    winscpPath = path;
+  }
+
+  async function runWinscpImport() {
+    if (!winscpPath.trim()) return;
+    winscpBusy = true;
+    winscpError = null;
+    winscpReport = null;
+    try {
+      winscpReport = await api.importWinscp(winscpPath.trim());
+      await onImported?.();
+    } catch (e) {
+      winscpError = String(e);
+    } finally {
+      winscpBusy = false;
+    }
   }
 
   async function saveCredentials() {
@@ -234,6 +434,7 @@
               <option value="ask">Спрашивать</option>
               <option value="overwrite">Перезаписывать</option>
               <option value="skip">Пропускать</option>
+              <option value="rename">Переименовывать</option>
             </select>
           </div>
           <div class="row"><div class="label">Проверка SHA-256</div>
@@ -262,6 +463,278 @@
           </div>
           <label class="check"><input type="checkbox" bind:checked={s.terminal.builtinXterm} /> Встроенный терминал</label>
         </section>
+        <section class="card">
+          <div class="card-title">Сниппеты</div>
+          <p class="note">Быстрые команды для терминала: избранные показываются над вводом.</p>
+          <div class="buttons">
+            <button class="btn" onclick={() => (snippetsOpen = true)}>
+              Управление сниппетами…
+            </button>
+          </div>
+        </section>
+      {:else if tab === "colors"}
+        <section class="card">
+          <div class="card-title">Правила подсветки файлов</div>
+          <p class="note">
+            Правила применяются к именам файлов и папок. Более высокий приоритет
+            перекрывает нижний; маска — это шаблон вида *.php.
+          </p>
+          {#if rules}
+            <div class="rules">
+              {#each rules.rules as rule, index (rule.id)}
+                <div class="rule">
+                  <span
+                    class="rule-dot"
+                    style:background={rule.fg ?? "var(--faint)"}
+                  ></span>
+                  <input
+                    class="rule-name"
+                    value={rule.name}
+                    onchange={(e) =>
+                      updateRule(index, {
+                        name: (e.target as HTMLInputElement).value,
+                      })}
+                  />
+                  <input
+                    class="rule-pattern"
+                    value={rule.pattern}
+                    onchange={(e) =>
+                      updateRule(index, {
+                        pattern: (e.target as HTMLInputElement).value,
+                      })}
+                  />
+                  <select
+                    value={rule.scope}
+                    onchange={(e) =>
+                      updateRule(index, {
+                        scope: (e.target as HTMLSelectElement).value,
+                      })}
+                  >
+                    <option value="both">везде</option>
+                    <option value="remote">сервер</option>
+                    <option value="local">локально</option>
+                  </select>
+                  <input
+                    class="rule-color"
+                    type="color"
+                    value={rule.fg ?? "#E8ECF3"}
+                    oninput={(e) =>
+                      updateRule(index, {
+                        fg: (e.target as HTMLInputElement).value,
+                      })}
+                  />
+                  <label class="check compact">
+                    <input
+                      type="checkbox"
+                      checked={rule.enabled}
+                      onchange={(e) =>
+                        updateRule(index, {
+                          enabled: (e.target as HTMLInputElement).checked,
+                        })}
+                    />
+                    вкл
+                  </label>
+                  <button
+                    class="icon"
+                    title="Удалить правило"
+                    onclick={() => removeRule(index)}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              {:else}
+                <div class="empty">Правил нет</div>
+              {/each}
+            </div>
+            <div class="buttons">
+              <button class="btn" onclick={addRule}>
+                <Plus size={13} /> Добавить правило
+              </button>
+              {#if rulesSaved}<span class="ok">{rulesSaved}</span>{/if}
+            </div>
+          {:else}
+            <div class="empty">Не удалось загрузить правила</div>
+          {/if}
+        </section>
+        {#if ruleDraft}
+          <section class="card">
+            <div class="card-title">Новое правило</div>
+            <div class="row">
+              <div class="label">Имя</div>
+              <input class="path" bind:value={ruleDraft.name} />
+            </div>
+            <div class="row">
+              <div class="label">Маска или регулярное выражение</div>
+              <input class="path" bind:value={ruleDraft.pattern} />
+            </div>
+            <div class="row">
+              <div class="label">Область</div>
+              <select bind:value={ruleDraft.scope}>
+                <option value="both">везде</option>
+                <option value="remote">сервер</option>
+                <option value="local">локально</option>
+              </select>
+            </div>
+            <div class="row">
+              <div class="label">Цвет</div>
+              <input class="rule-color" type="color" bind:value={ruleDraft.fg} />
+            </div>
+            <div class="checks">
+              <label><input type="checkbox" bind:checked={ruleDraft.isRegex} /> Регулярное выражение</label>
+              <label><input type="checkbox" bind:checked={ruleDraft.bold} /> Жирный</label>
+              <label><input type="checkbox" bind:checked={ruleDraft.italic} /> Курсив</label>
+              <label><input type="checkbox" bind:checked={ruleDraft.underline} /> Подчёркнутый</label>
+            </div>
+            <div class="buttons">
+              <button class="btn" onclick={() => (ruleDraft = null)}>Отмена</button>
+              <button class="btn primary" onclick={commitRule}>Добавить</button>
+            </div>
+          </section>
+        {/if}
+      {:else if tab === "logs"}
+        <section class="card">
+          <div class="card-title">Журнал редактирования</div>
+          {#if logSettings}
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={logSettings.editLog}
+                onchange={(e) => toggleEditLog((e.target as HTMLInputElement).checked)}
+              />
+              Записывать логи в папку logs
+            </label>
+          {/if}
+          <p class="note">
+            При включении каждое открытие и сохранение файла пишется в
+            logs/&lt;сервер&gt;_ДД-ММ-ГГГГ.log: дата, время, сервер и путь к файлу.
+          </p>
+          <div class="buttons">
+            <button class="btn" onclick={() => (logsOpen = true)}>
+              Открыть журнал
+            </button>
+          </div>
+        </section>
+      {:else if tab === "import"}
+        <section class="card">
+          <div class="card-title">Импорт из WinSCP</div>
+          <p class="note">
+            Пароли расшифровываются локально и сохраняются в зашифрованном
+            хранилище NovaSSH. Существующие серверы не перезаписываются.
+          </p>
+          <div class="row">
+            <div class="label">WinSCP.ini</div>
+            <input
+              class="path"
+              bind:value={winscpPath}
+              placeholder="C:\Users\...\WinSCP.ini"
+            />
+            <button class="btn" onclick={pickWinscp}>Обзор…</button>
+          </div>
+          <div class="buttons">
+            <button
+              class="btn primary"
+              disabled={winscpBusy || !winscpPath.trim()}
+              onclick={runWinscpImport}
+            >
+              {winscpBusy ? "Импортирую…" : "Импортировать серверы и группы"}
+            </button>
+          </div>
+          {#if winscpReport}
+            <div class="note ok-text">
+              Сессий: {winscpReport.sessions} · добавлено: {winscpReport.imported}
+              · пропущено: {winscpReport.skipped} · групп: {winscpReport.groups}
+              · паролей: {winscpReport.passwords}
+            </div>
+            {#if winscpReport.errors.length}
+              <div class="error">
+                {#each winscpReport.errors as message (message)}
+                  <div>{message}</div>
+                {/each}
+              </div>
+            {/if}
+          {/if}
+          {#if winscpError}<div class="error">{winscpError}</div>{/if}
+        </section>
+      {:else if tab === "sync"}
+        <SyncShareCard onImported={async () => await onImported?.()} onNotify={(message) => { toast = message; setTimeout(() => (toast = null), 2400); }} />
+      {:else if tab === "ai"}
+        {#if ai}
+          <section class="card">
+            <div class="card-title">ИИ-помощник</div>
+            <label class="check">
+              <input type="checkbox" bind:checked={ai.enabled} />
+              Включить помощника в терминале и сниппетах
+            </label>
+            <div class="row">
+              <div class="label">Провайдер</div>
+              <select
+                value={ai.provider}
+                onchange={(e) => changeProvider((e.target as HTMLSelectElement).value)}
+              >
+                {#each Object.entries(providers) as [id, preset] (id)}
+                  <option value={id}>{preset.label}</option>
+                {/each}
+              </select>
+            </div>
+            <div class="row">
+              <div class="label">Endpoint</div>
+              <input class="path" bind:value={ai.endpoint} />
+            </div>
+            <div class="row">
+              <div class="label">API-ключ<small>Хранится в зашифрованном виде</small></div>
+              <input class="path" type="password" bind:value={aiKey} placeholder="ключ" />
+            </div>
+            <div class="row">
+              <div class="label">Модель<small>Список берётся у провайдера</small></div>
+              <select bind:value={ai.model}>
+                {#if ai.model && !aiModels.some((model) => model.id === ai!.model)}
+                  <option value={ai.model}>{ai.model}</option>
+                {/if}
+                {#each aiModels as model (model.id)}
+                  <option value={model.id}>{model.name || model.id}</option>
+                {/each}
+              </select>
+              <button class="btn" disabled={aiBusy} onclick={loadAiModels}>
+                {aiBusy ? "Загружаю…" : "Загрузить модели"}
+              </button>
+            </div>
+            <label class="check">
+              <input type="checkbox" bind:checked={ai.includeContext} />
+              Передавать контекст сервера
+            </label>
+            <div class="buttons">
+              <button class="btn primary" disabled={aiBusy} onclick={saveAi}>
+                Сохранить ИИ
+              </button>
+              {#if aiSaved}<span class="ok">{aiSaved}</span>{/if}
+            </div>
+            {#if aiError}<div class="error">{aiError}</div>{/if}
+          </section>
+        {:else}
+          <div class="card">Загрузка настроек ИИ…</div>
+        {/if}
+      {:else if tab === "about"}
+        <section class="card">
+          <div class="card-title">О программе</div>
+          <div class="row"><div class="label">Версия</div><div>{info?.version ?? "—"}</div></div>
+          <div class="row"><div class="label">Данные</div><div class="about-path">{info?.dataDir ?? "—"}</div></div>
+          <div class="row"><div class="label">Платформа</div><div>{info?.platform ?? "—"}</div></div>
+          <div class="buttons">
+            <button
+              class="btn"
+              onclick={async () => {
+                await navigator.clipboard.writeText(info?.dataDir ?? "");
+                toast = "Путь данных скопирован";
+                setTimeout(() => (toast = null), 2000);
+              }}
+            >
+              Скопировать путь данных
+            </button>
+            <button class="btn" onclick={() => (logsOpen = true)}>
+              Журнал событий
+            </button>
+          </div>
+        </section>
       {:else if tab === "profile"}
         <section class="card">
           <div class="card-title">Профиль</div>
@@ -277,6 +750,7 @@
       {#if error}
         <div class="error">{error}</div>
       {/if}
+      {#if toast}<div class="toast">{toast}</div>{/if}
 
       <div class="footer">
         <button class="btn" onclick={onClose}>Отмена</button>
@@ -287,6 +761,18 @@
     </div>
   </div>
 </div>
+
+{#if snippetsOpen}
+  <SnippetsDialog
+    onClose={() => (snippetsOpen = false)}
+    onInsert={() => (snippetsOpen = false)}
+    onRun={() => (snippetsOpen = false)}
+  />
+{/if}
+
+{#if logsOpen}
+  <LogsDialog onClose={() => (logsOpen = false)} />
+{/if}
 
 {#if profileText}
   <div class="overlay" onclick={() => (profileText = null)}>
@@ -426,6 +912,125 @@
   }
 
   .label small,
+
+  .rules {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 8px;
+  }
+
+  .rule {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .rule-dot {
+    width: 10px;
+    height: 10px;
+    flex: 0 0 10px;
+    border-radius: 50%;
+  }
+
+  .rule-name {
+    width: 150px;
+  }
+
+  .rule-pattern {
+    flex: 1;
+    min-width: 60px;
+    font-family: var(--mono);
+  }
+
+  .rule-name,
+  .rule-pattern {
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 12px;
+    outline: none;
+  }
+
+  .rule-name:focus,
+  .rule-pattern:focus {
+    border-color: var(--accent);
+  }
+
+  .rule select {
+    height: 28px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+    color: var(--text);
+    font-size: 11.5px;
+  }
+
+  .rule-color {
+    width: 30px;
+    height: 28px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--panel);
+  }
+
+  .check.compact {
+    margin: 0;
+    font-size: 10.5px;
+  }
+
+  .checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    margin-bottom: 8px;
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+
+  .checks input {
+    accent-color: var(--accent);
+  }
+
+  .about-path {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+  }
+
+  .toast {
+    position: fixed;
+    right: 26px;
+    bottom: 24px;
+    padding: 8px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 11.5px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    z-index: 130;
+  }
+
+  .ok-text {
+    color: var(--success);
+  }
+
+  .empty {
+    padding: 14px;
+    text-align: center;
+    color: var(--faint);
+    font-size: 11.5px;
+  }
+
   .note {
     color: var(--faint);
     font-size: 11px;
@@ -557,6 +1162,12 @@
     justify-content: flex-end;
     gap: 8px;
     padding-top: 8px;
+  }
+
+  .ok {
+    align-self: center;
+    color: var(--success);
+    font-size: 11.5px;
   }
 
   .error {

@@ -2734,6 +2734,28 @@ pub fn pack_server_archive(
     format: Option<String>,
     sink: StreamSink<TransferEvent>,
 ) -> Result<(), String> {
+    pack_server_archive_with(
+        session_id,
+        sources,
+        target_path,
+        format,
+        move |event| {
+            let _ = sink.add(event);
+        },
+    )
+}
+
+#[frb(ignore)]
+pub fn pack_server_archive_with<F>(
+    session_id: String,
+    sources: Vec<String>,
+    target_path: String,
+    format: Option<String>,
+    emit: F,
+) -> Result<(), String>
+where
+    F: Fn(TransferEvent) + Send + Sync + 'static,
+{
     use std::sync::atomic::AtomicBool;
 
     if sources.is_empty() {
@@ -2771,8 +2793,9 @@ pub fn pack_server_archive(
     }
 
     let name = util::file_name(&target_path).to_string();
-    let emit = |sink: &StreamSink<TransferEvent>, state: TransferState, message: Option<String>| {
-        let _ = sink.add(TransferEvent {
+    let emit = std::sync::Arc::new(emit);
+    let notify = |state: TransferState, message: Option<String>| {
+        let _ = emit(TransferEvent {
             id: job_id.clone(),
             name: name.clone(),
             total: 0,
@@ -2781,8 +2804,7 @@ pub fn pack_server_archive(
             message,
         });
     };
-    emit(
-        &sink,
+    notify(
         TransferState::Running,
         Some("Упаковка на сервере…".into()),
     );
@@ -2817,10 +2839,10 @@ pub fn pack_server_archive(
                 .block_on(session.exec_result(&finish, std::time::Duration::from_secs(120)))
                 .map_err(|e| e.to_string())?;
             if code == 0 {
-                emit(&sink, TransferState::Done, Some(target_path.clone()));
+                notify(TransferState::Done, Some(target_path.clone()));
                 Ok(())
             } else {
-                emit(&sink, TransferState::Failed, Some(err.trim().to_string()));
+                notify(TransferState::Failed, Some(err.trim().to_string()));
                 Ok(())
             }
         }
@@ -2834,7 +2856,7 @@ pub fn pack_server_archive(
                 ),
                 std::time::Duration::from_secs(20),
             ));
-            emit(&sink, TransferState::Failed, Some(message));
+            notify(TransferState::Failed, Some(message));
             Ok(())
         }
         Err(error) if error == ARCHIVE_CANCELLED => {
@@ -2849,15 +2871,14 @@ pub fn pack_server_archive(
             );
             let _ = rt()
                 .block_on(session.exec_result(&kill, std::time::Duration::from_secs(20)));
-            emit(
-                &sink,
+            notify(
                 TransferState::Cancelled,
                 Some("Упаковка отменена".into()),
             );
             Ok(())
         }
         Err(error) => {
-            emit(&sink, TransferState::Failed, Some(error));
+            notify(TransferState::Failed, Some(error));
             Ok(())
         }
     };
@@ -3336,6 +3357,30 @@ pub fn unpack_server_archive(
     password: Option<String>,
     sink: StreamSink<TransferEvent>,
 ) -> Result<(), String> {
+    unpack_server_archive_with(
+        session_id,
+        archive_path,
+        inner,
+        target_dir,
+        password,
+        move |event| {
+            let _ = sink.add(event);
+        },
+    )
+}
+
+#[frb(ignore)]
+pub fn unpack_server_archive_with<F>(
+    session_id: String,
+    archive_path: String,
+    inner: String,
+    target_dir: String,
+    password: Option<String>,
+    emit: F,
+) -> Result<(), String>
+where
+    F: Fn(TransferEvent) + Send + Sync + 'static,
+{
     use std::sync::atomic::AtomicBool;
 
     let a = app()?;
@@ -3367,8 +3412,9 @@ pub fn unpack_server_archive(
     }
 
     let name = util::file_name(&archive_path).to_string();
-    let emit = |sink: &StreamSink<TransferEvent>, state: TransferState, message: Option<String>| {
-        let _ = sink.add(TransferEvent {
+    let emit = std::sync::Arc::new(emit);
+    let notify = |state: TransferState, message: Option<String>| {
+        let _ = emit(TransferEvent {
             id: job_id.clone(),
             name: name.clone(),
             total: 0,
@@ -3377,8 +3423,7 @@ pub fn unpack_server_archive(
             message,
         });
     };
-    emit(
-        &sink,
+    notify(
         TransferState::Running,
         Some("Распаковка на сервере…".into()),
     );
@@ -3421,7 +3466,7 @@ pub fn unpack_server_archive(
                     .or_default()
                     .push(target.clone());
             }
-            emit(&sink, TransferState::Done, Some(target));
+            notify(TransferState::Done, Some(target));
             Ok(())
         }
         Ok((stdout, stderr, _)) => {
@@ -3432,7 +3477,7 @@ pub fn unpack_server_archive(
                 &format!("rm -rf {}", util::shell_escape(&target)),
                 std::time::Duration::from_secs(20),
             ));
-            emit(&sink, TransferState::Failed, Some(message));
+            notify(TransferState::Failed, Some(message));
             Ok(())
         }
         Err(error) if error == "__cancelled__" => {
@@ -3447,15 +3492,14 @@ pub fn unpack_server_archive(
             );
             let _ = rt()
                 .block_on(session.exec_result(&kill, std::time::Duration::from_secs(20)));
-            emit(
-                &sink,
+            notify(
                 TransferState::Cancelled,
                 Some("Распаковка отменена".into()),
             );
             Ok(())
         }
         Err(error) => {
-            emit(&sink, TransferState::Failed, Some(error));
+            notify(TransferState::Failed, Some(error));
             Ok(())
         }
     };
@@ -3958,6 +4002,29 @@ pub fn copy_from_archive(
     target_dir: String,
     sink: StreamSink<TransferEvent>,
 ) -> Result<(), String> {
+    copy_from_archive_with(
+        session_id,
+        archive_path,
+        inner,
+        target_dir,
+        move |event| {
+            let _ = sink.add(event);
+        },
+    )
+}
+
+#[frb(ignore)]
+pub fn copy_from_archive_with<F>(
+    session_id: Option<String>,
+    archive_path: String,
+    inner: String,
+    target_dir: String,
+    emit: F,
+) -> Result<(), String>
+where
+    F: Fn(TransferEvent) + Send + Sync + 'static,
+{
+    let emit = std::sync::Arc::new(emit);
     let a = app()?;
     let target = provider_for(a, session_id)?;
     let archive = open_archive(&archive_path)?;
@@ -4013,7 +4080,7 @@ pub fn copy_from_archive(
         map.insert(event_id.clone(), cancel.clone());
     }
 
-    let _ = sink.add(TransferEvent {
+    let _ = emit(TransferEvent {
         id: event_id.clone(),
         name: label.clone(),
         total,
@@ -4149,7 +4216,7 @@ pub fn copy_from_archive(
                         done += chunk.len() as u64;
                         if done - last_emit >= 512 * 1024 || done == total {
                             last_emit = done;
-                            let _ = sink.add(TransferEvent {
+                            let _ = emit(TransferEvent {
                                 id: event_id.clone(),
                                 name: label.clone(),
                                 total,
@@ -4220,7 +4287,7 @@ pub fn copy_from_archive(
                 "{msg}; пропущено записей с недопустимыми именами: {n}"
             )),
         };
-        let _ = sink.add(TransferEvent {
+        let _ = emit(TransferEvent {
             id: event_id,
             name: label,
             total,
@@ -4237,7 +4304,8 @@ pub fn copy_from_archive(
 // WinSCP import
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WinscpImportReport {
     pub sessions: u32,
     pub imported: u32,

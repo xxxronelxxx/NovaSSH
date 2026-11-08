@@ -6,4 +6,5 @@ export interface BrowserTab {
   server: Server;
   sessionId: string;
   listing: DirListing | null;
+  disconnected?: boolean;
 }

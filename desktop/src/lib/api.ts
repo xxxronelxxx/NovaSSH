@@ -40,6 +40,19 @@ export interface Server {
   color?: string | null;
   auth: Auth;
   passwordRef?: string | null;
+  authFailed?: boolean;
+  reachable?: boolean | null;
+  checkedAt?: number | null;
+  ftpsMode?: string | null;
+  ftpsInsecure?: boolean | null;
+  passive?: boolean | null;
+  s3Endpoint?: string | null;
+  s3Region?: string | null;
+  s3Bucket?: string | null;
+  s3Prefix?: string | null;
+  s3PathStyle?: boolean | null;
+  s3AccessRef?: string | null;
+  s3SecretRef?: string | null;
 }
 
 export interface Group {
@@ -169,11 +182,13 @@ export interface Snippet {
   id: string;
   name: string;
   command: string;
-  group: string;
+  description: string;
   favorite: boolean;
   runImmediately: boolean;
   confirm: boolean;
   scope: string;
+  serverId: string | null;
+  order: number;
   [key: string]: unknown;
 }
 
@@ -182,6 +197,121 @@ export interface AiSettings {
   endpoint: string;
   model: string;
   [key: string]: unknown;
+}
+
+export interface CompareOptions {
+  ignoreWhitespace: boolean;
+  ignoreCase: boolean;
+  maxBytes: number | null;
+}
+
+export interface DiffWord {
+  text: string;
+  changed: boolean;
+}
+
+export interface DiffLine {
+  number: number;
+  text: string;
+  words: DiffWord[];
+}
+
+export interface DiffRow {
+  kind: "equal" | "add" | "del" | "mod";
+  left: DiffLine | null;
+  right: DiffLine | null;
+}
+
+export interface CompareResult {
+  leftLabel: string;
+  rightLabel: string;
+  leftSize: number;
+  rightSize: number;
+  equal: boolean;
+  binary: boolean;
+  truncated: boolean;
+  added: number;
+  removed: number;
+  changed: number;
+  leftHash: string | null;
+  rightHash: string | null;
+  leftEol: string;
+  rightEol: string;
+  rows: DiffRow[];
+}
+
+export interface SyncEntry {
+  relative: string;
+  action: "upload" | "download" | "skip";
+  reason: string;
+  size: number;
+  localPath: string;
+  remotePath: string;
+  localSize: number;
+  remoteSize: number;
+  localModified: number | null;
+  remoteModified: number | null;
+}
+
+export interface OpenSession {
+  serverId: string;
+  name: string;
+  localPath: string;
+  remotePath: string;
+}
+
+export interface SessionState {
+  version: number;
+  lastServerId: string | null;
+  servers: unknown[];
+  history: unknown[];
+  recentLocal: string[];
+  openSessions: OpenSession[];
+}
+
+export interface ColorRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  scope: string;
+  pattern: string;
+  isRegex: boolean;
+  fg: string | null;
+  bg: string | null;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+}
+
+export interface ColorRules {
+  version: number;
+  rules: ColorRule[];
+}
+
+export interface LogFile {
+  name: string;
+  path: string;
+  size: number;
+  modified: number;
+}
+
+export interface LogSettings {
+  editLog: boolean;
+}
+
+export interface WinscpImportReport {
+  sessions: number;
+  imported: number;
+  skipped: number;
+  groups: number;
+  passwords: number;
+  errors: string[];
+}
+
+export interface AiModel {
+  id: string;
+  name: string | null;
 }
 
 export interface ProfileImportReport {
@@ -258,6 +388,8 @@ export const api = {
       onEvent,
     }),
   cancelTransfer: (id: string) => invoke<boolean>("cancel_transfer", { id }),
+  downloadToCache: (sessionId: string, serverName: string, remotePath: string) =>
+    invoke<string>("download_to_cache", { sessionId, serverName, remotePath }),
   preview: (sessionId: string | null, path: string, maxBytes = 262144) =>
     invoke<string>("preview", { sessionId, path, maxBytes }),
   saveText: (file: FileRef, text: string) =>
@@ -314,9 +446,183 @@ export const api = {
   syncExportJson: (includeSecrets: boolean) =>
     invoke<string>("sync_export_json", { includeSecrets }),
   importSync: (json: string) => invoke<SyncReport>("import_sync", { json }),
+  archiveNeedsPassword: (archivePath: string) =>
+    invoke<boolean>("archive_needs_password", { archivePath }),
+  unlockArchive: (archivePath: string, password: string) =>
+    invoke<void>("unlock_archive", { archivePath, password }),
+  listArchive: (archivePath: string, inner: string, showHidden = true) =>
+    invoke<DirListing>("list_archive", { archivePath, inner, showHidden }),
+  previewArchive: (
+    archivePath: string,
+    inner: string,
+    maxBytes = 262144,
+    token: string | null = null,
+  ) =>
+    invoke<string>("preview_archive", { archivePath, inner, maxBytes, token }),
+  createArchive: (
+    sources: string[],
+    targetPath: string,
+    format: string | null = null,
+    token: string | null = null,
+  ) => invoke<number>("create_archive", { sources, targetPath, format, token }),
+  copyToArchive: (
+    sessionId: string | null,
+    sources: string[],
+    archivePath: string,
+    inner: string,
+    format: string | null,
+    token: string | null,
+  ) =>
+    invoke<number>("copy_to_archive", {
+      sessionId,
+      sources,
+      archivePath,
+      inner,
+      format,
+      token,
+    }),
+  assembleVolumes: (
+    sessionId: string | null,
+    parts: string[],
+    targetPath: string | null,
+  ) => invoke<string>("assemble_volumes", { sessionId, parts, targetPath }),
+  cancelArchiveTask: (token: string) =>
+    invoke<void>("cancel_archive_task", { token }),
+  cancelArchiveJob: (jobId: string) =>
+    invoke<void>("cancel_archive_job", { jobId }),
+  copyFromArchive: (
+    sessionId: string | null,
+    archivePath: string,
+    inner: string,
+    targetDir: string,
+    onEvent: Channel<TransferEvent>,
+  ) =>
+    invoke<void>("copy_from_archive", {
+      sessionId,
+      archivePath,
+      inner,
+      targetDir,
+      onEvent,
+    }),
+  packServerArchive: (
+    sessionId: string,
+    sources: string[],
+    targetPath: string,
+    format: string | null,
+    onEvent: Channel<TransferEvent>,
+  ) =>
+    invoke<void>("pack_server_archive", {
+      sessionId,
+      sources,
+      targetPath,
+      format,
+      onEvent,
+    }),
+  unpackServerArchive: (
+    sessionId: string,
+    archivePath: string,
+    inner: string,
+    targetDir: string,
+    password: string | null,
+    onEvent: Channel<TransferEvent>,
+  ) =>
+    invoke<void>("unpack_server_archive", {
+      sessionId,
+      archivePath,
+      inner,
+      targetDir,
+      password,
+      onEvent,
+    }),
+  loadSessionState: () => invoke<SessionState>("load_session_state"),
+  saveOpenSessions: (sessions: OpenSession[]) =>
+    invoke<void>("save_open_sessions", { sessions }),
+  rememberSession: (
+    serverId: string,
+    remotePath: string,
+    localPath: string,
+  ) =>
+    invoke<void>("remember_session", { serverId, remotePath, localPath }),
+  loadColorRules: () => invoke<ColorRules>("load_color_rules"),
+  saveColorRules: (rules: ColorRules) =>
+    invoke<void>("save_color_rules", { rules }),
+  listLogs: () => invoke<LogFile[]>("list_logs"),
+  readLog: (path: string, maxBytes = 512 * 1024) =>
+    invoke<string>("read_log", { path, maxBytes }),
+  logDir: () => invoke<string | null>("log_dir"),
+  loadLogSettings: () => invoke<LogSettings>("load_log_settings"),
+  saveLogSettings: (settings: LogSettings) =>
+    invoke<void>("save_log_settings", { settings }),
+  importWinscp: (iniPath: string) =>
+    invoke<WinscpImportReport>("import_winscp_ini", { iniPath }),
+  compareFiles: (left: FileRef, right: FileRef, options: CompareOptions) =>
+    invoke<CompareResult>("compare_files", { left, right, options }),
+  syncScan: (
+    sessionId: string,
+    localRoot: string,
+    remoteRoot: string,
+    mode: string,
+    maxFiles = 5000,
+  ) =>
+    invoke<SyncEntry[]>("sync_scan", {
+      sessionId,
+      localRoot,
+      remoteRoot,
+      mode,
+      maxFiles,
+    }),
+  aiModels: (endpoint: string, apiKey: string) =>
+    invoke<AiModel[]>("ai_models", { endpoint, apiKey }),
+  aiAsk: (
+    endpoint: string,
+    apiKey: string,
+    model: string,
+    question: string,
+    context: string,
+  ) =>
+    invoke<string>("ai_ask", { endpoint, apiKey, model, question, context }),
   startSyncShare: (includeSecrets: boolean) =>
     invoke<SyncShare>("start_sync_share", { includeSecrets }),
   stopSyncShare: () => invoke<void>("stop_sync_share"),
+  lockVault: () => invoke<void>("lock_vault"),
+  unlockVault: (password: string) =>
+    invoke<void>("unlock_vault", { password }),
+  vaultInfo: () => invoke<AppInfo>("vault_info"),
+  revealInExplorer: (path: string) =>
+    invoke<void>("reveal_in_explorer", { path }),
+  openTerminalAt: (path: string) =>
+    invoke<void>("open_terminal_at", { path }),
+  launchProcess: (command: string, args: string[]) =>
+    invoke<void>("launch_process", { command, args }),
+  launchEditor: (editor: string, path: string) =>
+    invoke<void>("launch_editor", { editor, path }),
+  pathExists: (path: string) => invoke<boolean>("path_exists", { path }),
+  uploadFromCache: (
+    sessionId: string,
+    localPath: string,
+    remotePath: string,
+  ) =>
+    invoke<void>("upload_from_cache", { sessionId, localPath, remotePath }),
+  fileMtimeMs: (path: string) => invoke<number>("file_mtime_ms", { path }),
+  uiLog: (line: string) => invoke<void>("ui_log", { line }),
+  appendEditLog: (
+    server: string,
+    serverName: string,
+    path: string,
+    action: string,
+    date: string,
+    time: string,
+  ) =>
+    invoke<void>("append_edit_log", {
+      server,
+      serverName,
+      path,
+      action,
+      date,
+      time,
+    }),
+  importSyncUrl: (url: string) =>
+    invoke<SyncReport>("import_sync_url", { url }),
 };
 
 export function formatBytes(value: number | null | undefined): string {

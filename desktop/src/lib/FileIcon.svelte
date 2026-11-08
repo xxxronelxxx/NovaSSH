@@ -19,7 +19,11 @@
   import type { Entry } from "./api";
   import { prefs } from "./theme.svelte";
 
-  let { entry, size = 15 }: { entry: Entry; size?: number } = $props();
+  let {
+    entry,
+    size = 15,
+    override = null,
+  }: { entry: Entry; size?: number; override?: string | null } = $props();
 
   const archives = new Set(["zip","tar","gz","tgz","tbz2","tbz","txz","tzst","bz2","xz","zst","7z","rar","deb","rpm","iso","cab","jar","war","apk","ipa","dmg"]);
   const images = new Set(["png","jpg","jpeg","gif","bmp","webp","svg","ico","tif","tiff","avif","heic","psd"]);
@@ -90,7 +94,10 @@
 </script>
 
 {#if entry.kind === "dir"}
-  <span class="ico" style:color={colored ? COLOR.folder : "var(--dir)"}>
+  <span
+    class="ico"
+    style:color={override ?? (colored ? COLOR.folder : "var(--dir)")}
+  >
     {#if prefs.folderIcons === "outline"}
       <Folder size={size} strokeWidth={1.8} />
     {:else}
@@ -136,7 +143,7 @@
                         : category === "text"
                           ? FileText
                           : File}
-  <span class="ico" style:color={color}>
+  <span class="ico" style:color={override ?? color}>
     <Icon size={size} strokeWidth={1.8} />
     {#if link}
       <MoveUpRight class="badge" size={7} strokeWidth={2.8} />

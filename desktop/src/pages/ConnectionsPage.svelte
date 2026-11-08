@@ -1,37 +1,56 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { open } from "@tauri-apps/plugin-dialog";
   import {
     ArrowRight,
     Folder,
     FolderPlus,
     Grid2x2,
+    History,
     KeyRound,
     Lock,
     Pencil,
     Plus,
+    RefreshCw,
     Search,
     Settings2,
+    Unlock,
+    X,
   } from "lucide-svelte";
   import ServerEditor from "../lib/ServerEditor.svelte";
   import type { BrowserTab } from "../lib/browser";
-  import { api, type Group, type Server, type ServerBook } from "../lib/api";
+  import {
+    api,
+    type Group,
+    type OpenSession,
+    type Server,
+    type ServerBook,
+    type WinscpImportReport,
+  } from "../lib/api";
 
   let {
     book,
     openTabs = [],
+    restore = [],
     onConnect,
     onOpenTab,
+    onRestore,
+    onHideRestore,
     onBookChanged,
     onSettings,
   }: {
     book: ServerBook | null;
     openTabs?: BrowserTab[];
+    restore?: OpenSession[];
     onConnect: (server: Server) => void;
     onOpenTab: (id: string) => void;
+    onRestore: () => void;
+    onHideRestore: () => void;
     onBookChanged: () => Promise<void>;
     onSettings: () => void;
   } = $props();
 
-  type Protocol = "all" | "ssh" | "ftp" | "s3";
+  type Protocol = "all" | "up" | "down" | "badpass" | "ssh" | "ftp" | "s3";
 
   let search = $state("");
   let group = $state<string | null>(null);
@@ -41,6 +60,132 @@
   let newGroupName = $state("");
   let groupPrompt = $state(false);
   let settingsBusy = $state(false);
+
+  let reachable = $state<Record<string, boolean | null>>({});
+  let probe = $state<{ done: number; total: number } | null>(null);
+  let importReport = $state<WinscpImportReport | null>(null);
+  let importError = $state<string | null>(null);
+  let importBusy = $state(false);
+  let locked = $state(false);
+  let dragGroup = $state<string | null>(null);
+  let dragServer = $state<string | null>(null);
+  let unlockOpen = $state(false);
+  let unlockPassword = $state("");
+  let unlockError = $state<string | null>(null);
+  let toast = $state<string | null>(null);
+
+  $effect(() => {
+    for (const server of book?.servers ?? []) {
+      if (server.reachable != null) reachable[server.id] = server.reachable;
+    }
+  });
+
+  onMount(async () => {
+    try {
+      locked = (await api.vaultInfo()).vault !== "unlocked";
+    } catch {
+      locked = false;
+    }
+  });
+
+  async function toggleLock() {
+    if (!locked) {
+      try {
+        await api.lockVault();
+        locked = true;
+        toast = "Хранилище заблокировано";
+        setTimeout(() => (toast = null), 2200);
+      } catch (e) {
+        importError = String(e);
+      }
+      return;
+    }
+    unlockPassword = "";
+    unlockError = null;
+    unlockOpen = true;
+  }
+
+  async function submitUnlock() {
+    try {
+      await api.unlockVault(unlockPassword);
+      locked = false;
+      unlockOpen = false;
+      await onBookChanged();
+    } catch (e) {
+      unlockError = String(e);
+    }
+  }
+
+  onMount(() => {
+    // Quiet background check for servers that were never probed or are stale.
+    const stale = (book?.servers ?? []).filter(
+      (server) =>
+        server.reachable == null ||
+        !server.checkedAt ||
+        Date.now() - server.checkedAt > 30 * 60 * 1000,
+    );
+    if (stale.length) void probeServers(stale, true);
+  });
+
+  async function probeServers(list: Server[], quiet = false) {
+    if (probe || !list.length) return;
+    probe = { done: 0, total: list.length };
+    for (const server of list) reachable[server.id] = null;
+    let index = 0;
+    const worker = async () => {
+      while (index < list.length) {
+        const server = list[index++];
+        let up: boolean | null = null;
+        try {
+          up = (await api.checkServerAccess(server.id)) !== "unreachable";
+        } catch {
+          up = false;
+        }
+        reachable[server.id] = up;
+        if (probe) probe.done += 1;
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, list.length) }, worker));
+    probe = null;
+    if (!quiet) await onBookChanged();
+  }
+
+  async function probeAll() {
+    await probeServers([...(book?.servers ?? [])]);
+  }
+
+  async function importWinscp() {
+    const path = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "WinSCP", extensions: ["ini"] }],
+    });
+    if (!path || Array.isArray(path)) return;
+    importBusy = true;
+    importError = null;
+    try {
+      importReport = await api.importWinscp(path);
+      await onBookChanged();
+    } catch (e) {
+      importError = String(e);
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  function statusTitle(server: Server): string {
+    if (reachable[server.id] === true) return "Доступен";
+    if (reachable[server.id] === false)
+      return server.authFailed ? "Логин отклонён" : "Недоступен";
+    return "Доступность не проверена";
+  }
+
+  function statusKind(server: Server): string {
+    if (reachable[server.id] === true) return "up";
+    if (reachable[server.id] === false)
+      return server.authFailed ? "badpass" : "down";
+    return "unknown";
+  }
 
   const groups: Group[] = $derived(book?.groups ?? []);
   const servers: Server[] = $derived(book?.servers ?? []);
@@ -63,7 +208,19 @@
     const query = search.trim().toLowerCase();
     return servers.filter((server) => {
       if (group && server.groupId !== group) return false;
-      if (protocol !== "all" && serverProtocol(server) !== protocol) {
+      if (protocol === "up" || protocol === "down" || protocol === "badpass") {
+        const state =
+          reachable[server.id] === true
+            ? "up"
+            : reachable[server.id] === false
+              ? "down"
+              : "unknown";
+        if (protocol === "up" && (state === "down" || server.authFailed)) {
+          return false;
+        }
+        if (protocol === "down" && state !== "down") return false;
+        if (protocol === "badpass" && !server.authFailed) return false;
+      } else if (protocol !== "all" && serverProtocol(server) !== protocol) {
         return false;
       }
       if (!query) return true;
@@ -76,6 +233,31 @@
       );
     });
   });
+
+  async function moveServerToGroup(serverId: string, groupId: string | null) {
+    const server = servers.find((item) => item.id === serverId);
+    if (!server || server.groupId === groupId) return;
+    await api.saveServer({ ...server, groupId });
+    await onBookChanged();
+  }
+
+  async function reorderGroup(movingId: string, targetId: string | null) {
+    if (movingId === targetId) return;
+    const ordered = [...groups]
+      .filter((item) => item.id !== movingId)
+      .sort((a, b) => a.order - b.order);
+    const moving = groups.find((item) => item.id === movingId);
+    if (!moving) return;
+    const index = targetId
+      ? Math.max(0, ordered.findIndex((item) => item.id === targetId))
+      : 0;
+    ordered.splice(index, 0, moving);
+    for (const [position, item] of ordered.entries()) {
+      if (item.order === position) continue;
+      await api.saveGroup({ ...item, order: position });
+    }
+    await onBookChanged();
+  }
 
   async function addGroup() {
     const name = newGroupName.trim();
@@ -109,14 +291,34 @@
         spellcheck="false"
       />
     </label>
-    <button class="top-btn" title="Импорт из WinSCP" disabled>
+    <button
+      class="top-btn"
+      title="Импорт из WinSCP"
+      disabled={importBusy}
+      onclick={importWinscp}
+    >
       <FolderPlus size={17} />
+    </button>
+    <button
+      class="top-btn"
+      title="Проверить доступность всех серверов"
+      disabled={!!probe}
+      onclick={probeAll}
+    >
+      <span class="icon-wrap" class:spin={!!probe}>
+        <RefreshCw size={17} />
+      </span>
     </button>
     <button class="top-btn" title="Новый сервер" onclick={() => (editing = "new")}>
       <Plus size={17} />
     </button>
-    <button class="top-btn" title="Продолжить сессию" disabled>
-      <ArrowRight size={17} />
+    <button
+      class="top-btn"
+      title="Продолжить прошлую сессию"
+      disabled={!restore.length}
+      onclick={onRestore}
+    >
+      <History size={17} />
     </button>
     <button class="top-btn" title="Ключи" disabled>
       <KeyRound size={17} />
@@ -124,10 +326,27 @@
     <button class="top-btn" title="Настройки" onclick={onSettings}>
       <Settings2 size={17} />
     </button>
-    <button class="top-btn" title="Заблокировать" disabled>
-      <Lock size={17} />
+    <button
+      class="top-btn"
+      title={locked ? "Разблокировать хранилище" : "Заблокировать хранилище"}
+      onclick={toggleLock}
+    >
+      {#if locked}<Unlock size={17} />{:else}<Lock size={17} />{/if}
     </button>
   </div>
+
+  {#if restore.length}
+    <div class="restore">
+      <History size={15} />
+      <span class="restore-text">
+        Прошлая сессия: {restore.map((item) => item.name || item.serverId).join(", ")}
+      </span>
+      <button class="restore-btn" onclick={onRestore}>Продолжить</button>
+      <button class="restore-x" title="Скрыть" onclick={onHideRestore}>
+        <X size={14} />
+      </button>
+    </div>
+  {/if}
 
   {#if openTabs.length}
     <div class="open-tabs">
@@ -159,6 +378,21 @@
       <button
         class="group"
         class:active={group === null}
+        ondragover={(event) => {
+          if (dragGroup) event.preventDefault();
+        }}
+        ondrop={async (event) => {
+          event.preventDefault();
+          const server = dragServer;
+          dragServer = null;
+          if (server) {
+            await moveServerToGroup(server, null);
+            return;
+          }
+          const moving = dragGroup;
+          dragGroup = null;
+          if (moving) await reorderGroup(moving, null);
+        }}
         onclick={() => (group = null)}
       >
         <Grid2x2 size={15} class="g-icon" />
@@ -169,6 +403,23 @@
         <button
           class="group"
           class:active={group === item.id}
+          draggable="true"
+          ondragstart={() => (dragGroup = item.id)}
+          ondragover={(event) => {
+            if (dragGroup) event.preventDefault();
+          }}
+          ondrop={async (event) => {
+            event.preventDefault();
+            const server = dragServer;
+            dragServer = null;
+            if (server) {
+              await moveServerToGroup(server, item.id);
+              return;
+            }
+            const moving = dragGroup;
+            dragGroup = null;
+            if (moving) await reorderGroup(moving, item.id);
+          }}
           onclick={() => (group = item.id)}
         >
           <span class="g-icon" style:color={item.color ?? "var(--dir)"}>
@@ -191,9 +442,12 @@
         <div class="servers-title">
           <span>Все серверы</span>
           <span class="count">{visible.length}</span>
+          {#if probe}
+            <span class="probe">{probe.done}/{probe.total}</span>
+          {/if}
         </div>
         <div class="chips">
-          {#each [["all", "Все"], ["ssh", "SSH"], ["ftp", "FTP"], ["s3", "S3"]] as [value, label] (value)}
+          {#each [["all", "Все"], ["up", "Работают"], ["down", "Не работают"], ["badpass", "Неверный доступ"], ["ssh", "SSH"], ["ftp", "FTP"], ["s3", "S3"]] as [value, label] (value)}
             <button
               class="chip"
               class:active={protocol === value}
@@ -212,12 +466,18 @@
             class:active={selected === server.id}
             role="button"
             tabindex="0"
+            draggable="true"
+            ondragstart={() => (dragServer = server.id)}
+            ondragend={() => (dragServer = null)}
             onpointerdown={() => (selected = server.id)}
             ondblclick={() => connect(server)}
             onkeydown={(e) => e.key === "Enter" && connect(server)}
           >
             <span class="check"></span>
-            <span class="status" title="Доступность не проверена"></span>
+            <span
+              class="status {statusKind(server)}"
+              title={statusTitle(server)}
+            ></span>
             <div class="info">
               <div class="s-name">{server.name || server.host}</div>
               <div class="s-sub">
@@ -267,6 +527,67 @@
       await onBookChanged();
     }}
   />
+{/if}
+
+{#if unlockOpen}
+  <div class="overlay" onclick={() => (unlockOpen = false)}>
+    <div class="group-dialog" onclick={(e) => e.stopPropagation()}>
+      <div class="group-title">Разблокировать хранилище</div>
+      <input
+        type="password"
+        bind:value={unlockPassword}
+        autofocus
+        placeholder="Мастер-пароль"
+        onkeydown={(e) => e.key === "Enter" && submitUnlock()}
+      />
+      {#if unlockError}<div class="import-errors">{unlockError}</div>{/if}
+      <div class="group-foot">
+        <button class="gbtn" onclick={() => (unlockOpen = false)}>Отмена</button>
+        <button class="gbtn primary" onclick={submitUnlock}>Открыть</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if toast}<div class="toast">{toast}</div>{/if}
+
+{#if importReport}
+  <div class="overlay" onclick={() => (importReport = null)}>
+    <div class="group-dialog import" onclick={(e) => e.stopPropagation()}>
+      <div class="group-title">Импорт из WinSCP</div>
+      <div class="import-line">Сессий в файле: {importReport.sessions}</div>
+      <div class="import-line">Добавлено: {importReport.imported}</div>
+      <div class="import-line">Пропущено: {importReport.skipped}</div>
+      <div class="import-line">Групп создано: {importReport.groups}</div>
+      <div class="import-line">Паролей перенесено: {importReport.passwords}</div>
+      {#if importReport.errors.length}
+        <div class="import-errors">
+          {#each importReport.errors as message (message)}
+            <div>{message}</div>
+          {/each}
+        </div>
+      {/if}
+      <div class="group-foot">
+        <button class="gbtn primary" onclick={() => (importReport = null)}>
+          Готово
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if importError}
+  <div class="overlay" onclick={() => (importError = null)}>
+    <div class="group-dialog" onclick={(e) => e.stopPropagation()}>
+      <div class="group-title">Импорт не удался</div>
+      <div class="import-errors">{importError}</div>
+      <div class="group-foot">
+        <button class="gbtn primary" onclick={() => (importError = null)}>
+          Закрыть
+        </button>
+      </div>
+    </div>
+  </div>
 {/if}
 
 {#if groupPrompt}
@@ -576,8 +897,90 @@
     height: 8px;
     flex: 0 0 8px;
     border-radius: 50%;
-    background: var(--accent);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+    background: var(--faint);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--faint) 14%, transparent);
+  }
+
+  .status.up {
+    background: var(--success);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 16%, transparent);
+  }
+
+  .status.down {
+    background: var(--error);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--error) 16%, transparent);
+  }
+
+  .status.badpass {
+    background: var(--warn);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 16%, transparent);
+  }
+
+  .icon-wrap {
+    display: grid;
+    place-items: center;
+  }
+
+  .spin {
+    animation: spin 0.9s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .probe {
+    color: var(--faint);
+    font-size: 10.5px;
+    font-family: var(--mono);
+  }
+
+  .restore {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 10px;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+    border-radius: var(--radius-sm);
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+
+  .restore-text {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .restore-btn {
+    padding: 4px 9px;
+    border-radius: var(--radius-sm);
+    color: var(--accent);
+    font-size: 11.5px;
+    font-weight: 600;
+  }
+
+  .restore-btn:hover {
+    background: var(--hover);
+  }
+
+  .restore-x {
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    color: var(--faint);
+  }
+
+  .restore-x:hover {
+    background: var(--hover);
+    color: var(--text);
   }
 
   .info {
@@ -666,6 +1069,44 @@
 
   .group-dialog input:focus {
     border-color: var(--accent);
+  }
+
+  .group-dialog.import {
+    width: 400px;
+  }
+
+  .import-line {
+    padding: 2px 0;
+    color: var(--dim);
+    font-size: 12px;
+  }
+
+  .import-errors {
+    max-height: 180px;
+    margin-top: 8px;
+    padding: 8px 10px;
+    overflow: auto;
+    background: var(--panel);
+    border: 1px solid rgba(248, 81, 73, 0.4);
+    border-radius: var(--radius-sm);
+    color: var(--error);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    line-height: 1.5;
+  }
+
+  .toast {
+    position: fixed;
+    right: 26px;
+    bottom: 24px;
+    padding: 8px 12px;
+    background: var(--panel);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 11.5px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+    z-index: 130;
   }
 
   .group-foot {

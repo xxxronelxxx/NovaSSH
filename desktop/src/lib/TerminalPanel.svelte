@@ -3,8 +3,10 @@
   import { Terminal } from "@xterm/xterm";
   import { FitAddon } from "@xterm/addon-fit";
   import "@xterm/xterm/css/xterm.css";
-  import { X } from "lucide-svelte";
-  import { api } from "../lib/api";
+  import { ListChecks, Sparkles, X } from "lucide-svelte";
+  import SnippetsDialog from "./SnippetsDialog.svelte";
+  import AiDialog from "./AiDialog.svelte";
+  import { api, type Snippet } from "../lib/api";
   import { prefs } from "../lib/theme.svelte";
 
   let {
@@ -22,6 +24,9 @@
   let shellId: string | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let error = $state<string | null>(null);
+  let snippetsOpen = $state(false);
+  let aiOpen = $state(false);
+  let favorites = $state<Snippet[]>([]);
 
   onMount(async () => {
     if (!host) return;
@@ -49,6 +54,9 @@
       fit.fit();
       term = t;
 
+      favorites = (await api.loadSnippets().catch(() => []))
+        .filter((item) => item.favorite)
+        .sort((a, b) => a.order - b.order);
       shellId = await api.openShell(sessionId, t.cols, t.rows);
       t.onData((data) => {
         if (shellId) api.shellWrite(shellId, data).catch(() => {});
@@ -75,6 +83,13 @@
     term?.dispose();
   });
 
+  function writeCommand(command: string, run: boolean) {
+    if (!shellId) return;
+    api.shellWrite(shellId, run ? `${command}
+` : command).catch(() => {});
+    term?.focus();
+  }
+
   function toggleTheme() {
     if (!term) return;
     const light = document.documentElement.dataset.theme === "light";
@@ -99,14 +114,51 @@
   <header>
     <span class="title">Терминал · {title}</span>
     <span class="grow"></span>
+    <button title="Сниппеты" onclick={() => (snippetsOpen = true)}>
+      <ListChecks size={14} />
+    </button>
+    <button title="ИИ-помощник" onclick={() => (aiOpen = true)}>
+      <Sparkles size={14} />
+    </button>
     <button title="Закрыть терминал" onclick={onClose}><X size={14} /></button>
   </header>
+  {#if favorites.length}
+    <div class="quick">
+      {#each favorites as snippet (snippet.id)}
+        <button
+          class="chip"
+          title={snippet.description || snippet.command}
+          onclick={() => writeCommand(snippet.command, false)}
+          ondblclick={() =>
+            writeCommand(snippet.command, snippet.runImmediately)}
+        >
+          {snippet.name}
+        </button>
+      {/each}
+    </div>
+  {/if}
   {#if error}
     <div class="error">{error}</div>
   {:else}
     <div class="host" bind:this={host}></div>
   {/if}
 </section>
+
+{#if snippetsOpen}
+  <SnippetsDialog
+    onClose={() => (snippetsOpen = false)}
+    onInsert={(command) => writeCommand(command, false)}
+    onRun={(command) => writeCommand(command, true)}
+  />
+{/if}
+
+{#if aiOpen}
+  <AiDialog
+    onClose={() => (aiOpen = false)}
+    onInsert={(command) => writeCommand(command, false)}
+    onRun={(command) => writeCommand(command, true)}
+  />
+{/if}
 
 <style>
   .terminal {
@@ -152,6 +204,30 @@
   header button:hover {
     background: var(--hover);
     color: var(--text);
+  }
+
+  .quick {
+    display: flex;
+    gap: 6px;
+    padding: 5px 10px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-header);
+  }
+
+  .chip {
+    flex: 0 0 auto;
+    padding: 3px 9px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--raised);
+    color: var(--dim);
+    font-size: 11px;
+  }
+
+  .chip:hover {
+    color: var(--text);
+    border-color: var(--accent);
   }
 
   .host {

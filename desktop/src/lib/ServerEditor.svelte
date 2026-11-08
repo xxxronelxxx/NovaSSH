@@ -32,8 +32,22 @@
   let showPassphrase = $state(false);
   let groupId = $state(server?.groupId ?? "");
   let tags = $state((server?.tags ?? []).join(", "));
+  let ftpsMode = $state(server?.ftpsMode ?? "explicit");
+  let ftpsInsecure = $state(server?.ftpsInsecure ?? false);
+  let passive = $state(server?.passive ?? true);
+  let s3Endpoint = $state(server?.s3Endpoint ?? "");
+  let s3Region = $state(server?.s3Region ?? "");
+  let s3Bucket = $state(server?.s3Bucket ?? "");
+  let s3Prefix = $state(server?.s3Prefix ?? "");
+  let s3PathStyle = $state(server?.s3PathStyle ?? true);
+  let s3Access = $state("");
+  let s3Secret = $state("");
+  let showS3Secret = $state(false);
   let error = $state<string | null>(null);
   let busy = $state(false);
+
+  const s3AccessId = $state(server?.s3AccessRef ?? `s3a_${server?.id ?? id}`);
+  const s3SecretId = $state(server?.s3SecretRef ?? `s3s_${server?.id ?? id}`);
 
   onMount(async () => {
     if (!existing) return;
@@ -44,6 +58,10 @@
       if (server?.auth?.type === "key" && server.auth?.passphraseRef) {
         passphrase = (await api.getSecret(server.auth.passphraseRef)) ?? "";
       }
+      if (server?.protocol === "s3") {
+        s3Access = (await api.getSecret(s3AccessId)) ?? "";
+        s3Secret = (await api.getSecret(s3SecretId)) ?? "";
+      }
     } catch {
       // A locked vault simply leaves the fields empty.
     }
@@ -51,13 +69,17 @@
 
   async function save() {
     error = null;
-    if (!host.trim() || !user.trim()) {
+    if (protocol !== "s3" && (!host.trim() || !user.trim())) {
       error = "Заполните хост и пользователя";
       return;
     }
     const parsedPort = Number.parseInt(port, 10);
     if (!Number.isFinite(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
       error = "Неверный порт";
+      return;
+    }
+    if (protocol === "s3" && !s3Endpoint.trim()) {
+      error = "Укажите endpoint S3";
       return;
     }
 
@@ -68,25 +90,43 @@
         server?.auth?.passphraseRef ??
         (authType === "key" ? `pass_${id}` : null);
 
+      const isS3 = protocol === "s3";
+      const hostValue = isS3 ? s3Endpoint.trim() : host.trim();
       const next: Server = {
         ...(server ?? { groupId: null, tags: [] }),
         id,
         groupId: groupId || null,
-        name: name.trim() || `${user.trim()}@${host.trim()}`,
-        host: host.trim(),
-        port: parsedPort,
-        user: user.trim(),
+        name:
+          name.trim() ||
+          (isS3
+            ? s3Bucket.trim() || s3Endpoint.trim()
+            : `${user.trim()}@${host.trim()}`),
+        host: hostValue,
+        port: isS3 ? 443 : parsedPort,
+        user: isS3 ? "" : user.trim(),
         protocol,
         tags: tags
           .split(",")
           .map((tag) => tag.trim())
           .filter(Boolean),
-        passwordRef: authType === "password" ? passwordRef : null,
+        passwordRef: !isS3 && authType === "password" ? passwordRef : null,
         auth: {
           type: authType,
-          keyPath: authType === "key" ? keyPath.trim() : null,
-          passphraseRef: authType === "key" ? passphraseRef : null,
+          keyPath:
+            !isS3 && authType === "key" ? keyPath.trim() : null,
+          passphraseRef:
+            !isS3 && authType === "key" ? passphraseRef : null,
         },
+        ftpsMode: protocol === "ftps" ? ftpsMode : null,
+        ftpsInsecure: protocol === "ftps" ? ftpsInsecure : null,
+        passive: protocol === "ftp" || protocol === "ftps" ? passive : null,
+        s3Endpoint: isS3 ? s3Endpoint.trim() : (server?.s3Endpoint ?? null),
+        s3Region: isS3 ? s3Region.trim() : (server?.s3Region ?? null),
+        s3Bucket: isS3 ? s3Bucket.trim() : (server?.s3Bucket ?? null),
+        s3Prefix: isS3 ? s3Prefix.trim() : (server?.s3Prefix ?? null),
+        s3PathStyle: isS3 ? s3PathStyle : (server?.s3PathStyle ?? null),
+        s3AccessRef: isS3 ? s3AccessId : (server?.s3AccessRef ?? null),
+        s3SecretRef: isS3 ? s3SecretId : (server?.s3SecretRef ?? null),
       };
 
       const saved = await api.saveServer(next);
@@ -95,6 +135,10 @@
       }
       if (authType === "key" && passphrase.trim() && passphraseRef) {
         await api.setSecret(passphraseRef, passphrase);
+      }
+      if (protocol === "s3") {
+        if (s3Access.trim()) await api.setSecret(s3AccessId, s3Access.trim());
+        if (s3Secret.trim()) await api.setSecret(s3SecretId, s3Secret.trim());
       }
       await onSaved(saved);
     } catch (e) {
@@ -131,24 +175,27 @@
         <span>Название</span>
         <input bind:value={name} placeholder="Мой сервер" />
       </label>
-      <label class="field">
-        <span>Хост</span>
-        <input bind:value={host} placeholder="example.com или 10.0.0.1" />
-      </label>
-      <label class="field small">
-        <span>Порт</span>
-        <input bind:value={port} inputmode="numeric" />
-      </label>
-      <label class="field">
-        <span>Пользователь</span>
-        <input bind:value={user} placeholder="root" />
-      </label>
+      {#if protocol !== "s3"}
+        <label class="field">
+          <span>Хост</span>
+          <input bind:value={host} placeholder="example.com или 10.0.0.1" />
+        </label>
+        <label class="field small">
+          <span>Порт</span>
+          <input bind:value={port} inputmode="numeric" />
+        </label>
+        <label class="field">
+          <span>Пользователь</span>
+          <input bind:value={user} placeholder="root" />
+        </label>
+      {/if}
       <label class="field">
         <span>Протокол</span>
         <select bind:value={protocol}>
           <option value="sftp">SFTP (SSH)</option>
           <option value="ftp">FTP</option>
           <option value="ftps">FTPS</option>
+          <option value="s3">S3 / MinIO</option>
         </select>
       </label>
       <label class="field">
@@ -160,6 +207,73 @@
           {/each}
         </select>
       </label>
+
+      {#if protocol === "s3"}
+        <label class="field wide">
+          <span>Endpoint</span>
+          <input
+            bind:value={s3Endpoint}
+            placeholder="https://s3.amazonaws.com или http://192.168.1.9:9000"
+          />
+        </label>
+        <label class="field">
+          <span>Регион</span>
+          <input bind:value={s3Region} placeholder="us-east-1" />
+        </label>
+        <label class="field">
+          <span>Bucket</span>
+          <input bind:value={s3Bucket} placeholder="my-bucket" />
+        </label>
+        <label class="field wide">
+          <span>Префикс<small>Необязательно: папка внутри bucket</small></span>
+          <input bind:value={s3Prefix} placeholder="backups/site" />
+        </label>
+        <label class="field wide">
+          <span>Access key</span>
+          <input bind:value={s3Access} placeholder="AKIA..." />
+        </label>
+        <label class="field wide">
+          <span>Secret key</span>
+          <div class="secret">
+            <input
+              type={showS3Secret ? "text" : "password"}
+              bind:value={s3Secret}
+              placeholder={existing ? "оставьте пустым, чтобы не менять" : "secret"}
+            />
+            <button
+              class="eye"
+              type="button"
+              title={showS3Secret ? "Скрыть" : "Показать"}
+              onclick={() => (showS3Secret = !showS3Secret)}
+            >
+              {#if showS3Secret}<EyeOff size={14} />{:else}<Eye size={14} />{/if}
+            </button>
+          </div>
+        </label>
+        <label class="check wide">
+          <input type="checkbox" bind:checked={s3PathStyle} />
+          Path-style addressing (MinIO и self-hosted)
+        </label>
+      {:else if protocol === "ftps"}
+        <label class="field">
+          <span>Режим TLS</span>
+          <select bind:value={ftpsMode}>
+            <option value="explicit">Explicit (AUTH TLS, 21)</option>
+            <option value="implicit">Implicit (990)</option>
+          </select>
+        </label>
+        <label class="check wide">
+          <input type="checkbox" bind:checked={ftpsInsecure} />
+          Принимать самоподписанный сертификат
+        </label>
+      {/if}
+
+      {#if protocol === "ftp" || protocol === "ftps"}
+        <label class="check wide">
+          <input type="checkbox" bind:checked={passive} />
+          Пассивный режим
+        </label>
+      {/if}
 
       {#if protocol === "sftp"}
         <label class="field">
@@ -176,7 +290,7 @@
         <input bind:value={tags} placeholder="nginx, php" />
       </label>
 
-      {#if authType === "password" || protocol !== "sftp"}
+      {#if protocol !== "s3" && (authType === "password" || protocol !== "sftp")}
         <label class="field wide">
           <span>Пароль</span>
           <div class="secret">
@@ -195,7 +309,7 @@
             </button>
           </div>
         </label>
-      {:else}
+      {:else if protocol !== "s3"}
         <label class="field wide">
           <span>Файл ключа</span>
           <input bind:value={keyPath} placeholder="C:\Users\you\.ssh\id_ed25519" />
@@ -295,8 +409,27 @@
     gap: 5px;
   }
 
-  .field.wide {
+  .field.wide,
+  .check.wide {
     grid-column: span 2;
+  }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--dim);
+    font-size: 11.5px;
+  }
+
+  .check input {
+    accent-color: var(--accent);
+  }
+
+  .field span small {
+    margin-left: 6px;
+    color: var(--faint);
+    font-size: 10px;
   }
 
   .field.small {

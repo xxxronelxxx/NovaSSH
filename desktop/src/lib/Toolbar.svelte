@@ -26,12 +26,18 @@
     canRename = false,
     canDelete = false,
     canEdit = false,
+    canCompare = false,
+    canSync = false,
+    canExtract = false,
     terminalOpen = false,
     filter = "",
     onBack,
     onUp,
     onRefresh,
     onCopy,
+    onCompare,
+    onSync,
+    onExtract,
     onRename,
     onDelete,
     onMkdir,
@@ -45,12 +51,18 @@
     canRename?: boolean;
     canDelete?: boolean;
     canEdit?: boolean;
+    canCompare?: boolean;
+    canSync?: boolean;
+    canExtract?: boolean;
     terminalOpen?: boolean;
     filter?: string;
     onBack: () => void;
     onUp: () => void;
     onRefresh: () => void;
     onCopy: () => void;
+    onCompare: () => void;
+    onSync: () => void;
+    onExtract: () => void;
     onRename: () => void;
     onDelete: () => void;
     onMkdir: () => void;
@@ -80,7 +92,7 @@
   <button class="tool" title="Копировать (F5)" disabled={!canCopy} onclick={onCopy}>
     <Copy size={16} />
   </button>
-  <button class="tool" title="Сравнить файлы (Ctrl+F3)" disabled>
+  <button class="tool" title="Сравнить файлы (Ctrl+F3)" disabled={!canCompare} onclick={onCompare}>
     <GitCompare size={16} />
   </button>
   <button class="tool" title="Сравнить каталоги" disabled>
@@ -89,10 +101,10 @@
   <button class="tool" title="Синхронная навигация" disabled>
     <ArrowLeftRight size={16} />
   </button>
-  <button class="tool" title="Синхронизация каталогов" disabled>
+  <button class="tool" title="Синхронизация каталогов" disabled={!canSync} onclick={onSync}>
     <Repeat size={16} />
   </button>
-  <button class="tool" title="Распаковать в другую панель (Ctrl+F5)" disabled>
+  <button class="tool" title="Распаковать в другую панель (Ctrl+F5)" disabled={!canExtract} onclick={onExtract}>
     <ArchiveRestore size={16} />
   </button>
 
