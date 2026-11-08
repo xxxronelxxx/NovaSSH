@@ -27,3 +27,11 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 [target."cfg(windows)".dependencies]
 window-vibrancy = "0.6"
+
+# The app links the whole Rust core, AWS SDK and WebView assets into one exe.
+# Keep the release build small: size-first optimisation, thin LTO, no symbols.
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
