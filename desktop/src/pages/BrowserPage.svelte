@@ -89,6 +89,8 @@
   let focused = $state<"local" | "remote">("local");
   let localSel = $state<string[]>([]);
   let remoteSel = $state<string[]>([]);
+  let localCursor = $state<string | null>(null);
+  let remoteCursor = $state<string | null>(null);
   let filter = $state("");
   let transferCollapsed = $state(false);
   let terminalOpen = $state(false);
@@ -102,6 +104,41 @@
     inner: string;
     listing: DirListing | null;
   } | null>(null);
+
+  let syncedTabId = "";
+  let stateLoadedFor = "";
+
+  $effect(() => {
+    localSel;
+    remoteSel;
+    archive;
+    const tab = tabs.find((item) => item.id === syncedTabId);
+    if (!tab) return;
+    tab.localSel = [...localSel];
+    tab.remoteSel = [...remoteSel];
+    tab.archive = archive;
+  });
+
+  $effect(() => {
+    const id = activeTabId;
+    if (id === stateLoadedFor) return;
+    if (syncedTabId && syncedTabId !== id) {
+      const previous = tabs.find((item) => item.id === syncedTabId);
+      if (previous) {
+        previous.localSel = [...localSel];
+        previous.remoteSel = [...remoteSel];
+        previous.archive = archive;
+      }
+    }
+    stateLoadedFor = id;
+    syncedTabId = id;
+    const next = tabs.find((item) => item.id === id);
+    localSel = next ? [...next.localSel] : [];
+    remoteSel = next ? [...next.remoteSel] : [];
+    localCursor = localSel.length ? localSel[localSel.length - 1] : null;
+    remoteCursor = remoteSel.length ? remoteSel[remoteSel.length - 1] : null;
+    archive = next?.archive ?? null;
+  });
 
   let menu = $state<{ x: number; y: number; entry: Entry | null } | null>(null);
   let prompt = $state<{
@@ -193,10 +230,14 @@
   const selectedPath = $derived(
     selectedPaths.length ? selectedPaths[selectedPaths.length - 1] : null,
   );
-  const selectedEntry = $derived(
-    (listing?.entries ?? []).find((entry) => entry.path === selectedPath) ??
+  const cursorPath = $derived(
+    focused === "local" ? localCursor : remoteCursor,
+  );
+  const cursorEntry = $derived(
+    (listing?.entries ?? []).find((entry) => entry.path === cursorPath) ??
       null,
   );
+  const selectedEntry = $derived(cursorEntry);
   const selectedEntries = $derived(
     (listing?.entries ?? []).filter((entry) =>
       selectedPaths.includes(entry.path),
@@ -234,12 +275,43 @@
       (entry) => entry.path === remoteSel[remoteSel.length - 1],
     ) ?? null,
   );
-  const canCompare = $derived(
-    !!localEntry &&
-      !!remoteEntry &&
+  const comparePair = $derived.by((): { left: FileRef; right: FileRef } | null => {
+    const localPicked = (localListing?.entries ?? []).filter(
+      (entry) => localSel.includes(entry.path) && entry.kind !== "dir",
+    );
+    const remotePicked = (remote?.entries ?? []).filter(
+      (entry) => remoteSel.includes(entry.path) && entry.kind !== "dir",
+    );
+    if (localPicked.length >= 2) {
+      return {
+        left: localRef(localPicked[0]),
+        right: localRef(localPicked[1]),
+      };
+    }
+    if (remotePicked.length >= 2) {
+      return {
+        left: remoteRef(remotePicked[0]),
+        right: remoteRef(remotePicked[1]),
+      };
+    }
+    if (localPicked.length === 1 && remotePicked.length === 1) {
+      return {
+        left: localRef(localPicked[0]),
+        right: remoteRef(remotePicked[0]),
+      };
+    }
+    if (
+      localEntry &&
+      remoteEntry &&
       localEntry.kind !== "dir" &&
-      remoteEntry.kind !== "dir",
-  );
+      remoteEntry.kind !== "dir"
+    ) {
+      return { left: localRef(localEntry), right: remoteRef(remoteEntry) };
+    }
+    return null;
+  });
+
+  const canCompare = $derived(comparePair !== null);
   const canSync = $derived(
     !archive &&
       !!tab &&
@@ -303,6 +375,7 @@
 
   function selectLocal(entry: Entry, mode: "single" | "toggle" | "range") {
     focused = "local";
+    localCursor = entry.path;
     localSel = applySelection(
       localSel,
       localListing?.entries ?? [],
@@ -313,6 +386,7 @@
 
   function selectRemote(entry: Entry, mode: "single" | "toggle" | "range") {
     focused = "remote";
+    remoteCursor = entry.path;
     remoteSel = applySelection(
       remoteSel,
       remote?.entries ?? [],
@@ -323,6 +397,8 @@
 
   function beginSelection(entry: Entry) {
     selecting = true;
+    if (focused === "local") localCursor = entry.path;
+    else remoteCursor = entry.path;
     if (focused === "local") {
       localSel = localSel.includes(entry.path)
         ? localSel
@@ -402,6 +478,7 @@
 
   async function navigateLocal(path: string) {
     localSel = [];
+    localCursor = null;
     if (archive) {
       await loadArchive(path);
       return;
@@ -412,9 +489,25 @@
     await syncOther(name);
   }
 
+  async function resolveRemotePath(tabId: string, input: string) {
+    const current = tabs.find((item) => item.id === tabId);
+    if (!current) return;
+    try {
+      const resolved = await api.resolveRemoteDir(
+        current.sessionId,
+        input,
+        current.listing?.path ?? "/",
+      );
+      await onRemotePath(tabId, resolved);
+    } catch (e) {
+      error = `Путь: ${e}`;
+    }
+  }
+
   async function navigateRemote(path: string) {
     if (!tab) return;
     remoteSel = [];
+    remoteCursor = null;
     const name = baseName(path);
     focused = "remote";
     await onRemotePath(tab.id, path, effectiveHidden());
@@ -909,6 +1002,7 @@
       remoteSel = [];
     }
     focused = "remote";
+    remoteCursor = entry.path;
     remoteSel = applySelection(remoteSel, entries, entry, mode);
   }
 
@@ -927,6 +1021,7 @@
       remoteSel = [];
     }
     focused = "remote";
+    remoteCursor = entry.path;
     remoteSel = [entry.path];
     openRemote(entry);
   }
@@ -1475,6 +1570,22 @@
     findResults = [];
   }
 
+  async function gotoFound(found: FoundFile) {
+    findOpen = false;
+    const parent =
+      found.path.replace(/[\/][^\/]+$/, "") || listing?.path || "";
+    if (!parent) return;
+    if (focused === "local") {
+      await onLocalPath(parent, effectiveHidden());
+      localCursor = found.path;
+      localSel = [found.path];
+    } else if (tab) {
+      await onRemotePath(tab.id, parent, effectiveHidden());
+      remoteCursor = found.path;
+      remoteSel = [found.path];
+    }
+  }
+
   async function runFind() {
     if (!listing) return;
     await run("Ищу…", async () => {
@@ -1696,10 +1807,13 @@
       event.preventDefault();
       const entries = listing?.entries ?? [];
       if (!entries.length) return;
-      const target = event.key === "Home" ? entries[0] : entries[entries.length - 1];
+      const target =
+        event.key === "Home" ? entries[0] : entries[entries.length - 1];
       if (focused === "local") {
+        localCursor = target.path;
         localSel = applySelection(localSel, entries, target, "range");
       } else {
+        remoteCursor = target.path;
         remoteSel = applySelection(remoteSel, entries, target, "range");
       }
       return;
@@ -1708,31 +1822,22 @@
       event.preventDefault();
       const entries = listing?.entries ?? [];
       if (!entries.length) return;
-      const index = entries.findIndex((entry) => entry.path === selectedPath);
+      const index = entries.findIndex((entry) => entry.path === cursorPath);
       const next =
         event.key === "ArrowDown"
           ? Math.min(entries.length - 1, index + 1)
           : Math.max(0, index - 1);
-      if (event.shiftKey) {
-        if (focused === "local") {
-          localSel = applySelection(
-            localSel,
-            entries,
-            entries[next],
-            "range",
-          );
-        } else {
-          remoteSel = applySelection(
-            remoteSel,
-            entries,
-            entries[next],
-            "range",
-          );
-        }
-      } else if (focused === "local") {
-        localSel = [entries[next].path];
+      const target = entries[next];
+      if (focused === "local") {
+        localCursor = target.path;
+        localSel = event.shiftKey
+          ? applySelection(localSel, entries, target, "range")
+          : [target.path];
       } else {
-        remoteSel = [entries[next].path];
+        remoteCursor = target.path;
+        remoteSel = event.shiftKey
+          ? applySelection(remoteSel, entries, target, "range")
+          : [target.path];
       }
       return;
     }
@@ -1741,10 +1846,15 @@
       const entries = listing?.entries ?? [];
       const entry = selectedEntry;
       if (!entry) return;
+      const index = entries.findIndex((item) => item.path === entry.path);
       if (focused === "local") {
         localSel = applySelection(localSel, entries, entry, "toggle");
+        const next = entries[Math.min(entries.length - 1, index + 1)];
+        if (next && next.path !== entry.path) localCursor = next.path;
       } else {
         remoteSel = applySelection(remoteSel, entries, entry, "toggle");
+        const next = entries[Math.min(entries.length - 1, index + 1)];
+        if (next && next.path !== entry.path) remoteCursor = next.path;
       }
       return;
     }
@@ -1913,6 +2023,7 @@
       activeTab={localActive}
       listing={localListing}
       selected={localSel}
+      cursor={localCursor}
       focused={focused === "local"}
       filter={focused === "local" ? filter : ""}
       rootLabel={archive ? (archive.path.split(/[\\/]/).pop() ?? "архив") : undefined}
@@ -1943,6 +2054,7 @@
             activeTab={item.id}
             listing={item.listing}
             selected={item.id === activeTabId ? remoteSel : []}
+            cursor={item.id === activeTabId ? remoteCursor : null}
             focused={item.id === activeTabId && focused === "remote"}
             filter={item.id === activeTabId && focused === "remote" ? filter : ""}
             canAdd
@@ -1967,6 +2079,11 @@
             onRefresh={() =>
               item.listing && gridNavigate(item.id, item.listing.path)}
             onPath={(path) => gridNavigate(item.id, path)}
+            onSubmitPath={(path) => {
+              activeTabId = item.id;
+              focused = "remote";
+              void resolveRemotePath(item.id, path);
+            }}
             onSelect={(entry, mode) =>
               gridSelect(item.id, item.listing?.entries ?? [], entry, mode)}
             onDrop={(source, paths) => {
@@ -1993,6 +2110,7 @@
         activeTab={activeTabId}
         listing={remote}
         selected={remoteSel}
+        cursor={remoteCursor}
         focused={focused === "remote"}
         filter={focused === "remote" ? filter : ""}
         canAdd
@@ -2017,6 +2135,7 @@
         onUp={() => remote?.parent && navigateRemote(remote.parent)}
         onRefresh={() => remote && navigateRemote(remote.path)}
         onPath={navigateRemote}
+        onSubmitPath={(path) => void resolveRemotePath(activeTabId, path)}
         onSelect={selectRemote}
         onDrop={(source, paths) => dropPaths(source, "remote", paths)}
         onOpen={openRemote}
@@ -2028,7 +2147,11 @@
 
   {#if tab?.disconnected}
     <div class="offline">
-      <span>Соединение с сервером потеряно.</span>
+      <span>
+        Соединение с сервером потеряно{tab.disconnectReason
+          ? `: ${tab.disconnectReason}`
+          : "."}
+      </span>
       <button class="btn primary" onclick={() => onReconnect(tab!.id)}>
         Переподключиться
       </button>
@@ -2224,10 +2347,10 @@
   />
 {/if}
 
-{#if compareOpen && localEntry && remoteEntry}
+{#if compareOpen && comparePair}
   <CompareDialog
-    left={localRef(localEntry)}
-    right={remoteRef(remoteEntry)}
+    left={comparePair.left}
+    right={comparePair.right}
     onClose={() => (compareOpen = false)}
   />
 {/if}
@@ -2473,11 +2596,14 @@
       </div>
       <div class="find-results">
         {#each findResults as found (found.path)}
-          <div class="found">
+          <button class="found" onclick={() => gotoFound(found)}>
             <span class="found-name">{found.name}</span>
             <span class="found-path">{found.path}</span>
+            {#if found.matches > 0}
+              <span class="found-matches">{found.matches}</span>
+            {/if}
             <span class="found-size">{found.isDir ? "" : formatBytes(found.size)}</span>
-          </div>
+          </button>
         {:else}
           <div class="empty">Ничего не найдено</div>
         {/each}
@@ -3016,7 +3142,12 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    width: 100%;
     padding: 6px 10px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
     font-size: 11.5px;
   }
 
@@ -3040,6 +3171,14 @@
     color: var(--faint);
     font-family: var(--mono);
     font-size: 10.5px;
+  }
+
+  .found-matches {
+    width: 44px;
+    text-align: right;
+    color: var(--warn);
+    font-family: var(--mono);
+    font-size: 10px;
   }
 
   .found-size {

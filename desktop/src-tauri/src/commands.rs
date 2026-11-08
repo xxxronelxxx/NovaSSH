@@ -1076,3 +1076,21 @@ pub async fn clear_all_tmp() -> Result<(), String> {
 pub async fn exec_remote(session_id: String, command: String) -> Result<String, String> {
     blocking!(api::exec_remote(session_id, command))
 }
+
+#[tauri::command]
+pub async fn compare_text(
+    left: String,
+    right: String,
+    options: CompareOptions,
+) -> Result<CompareResult, String> {
+    Ok(api::compare_text(left, right, options))
+}
+
+#[tauri::command]
+pub async fn resolve_remote_dir(
+    session_id: String,
+    input: String,
+    fallback: String,
+) -> Result<String, String> {
+    blocking!(api::resolve_remote_dir(session_id, input, fallback))
+}

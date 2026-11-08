@@ -24,6 +24,7 @@
     activeTab,
     listing,
     selected = [],
+    cursor = null,
     focused = false,
     filter = "",
     canAdd = false,
@@ -44,6 +45,7 @@
     onUp,
     onRefresh,
     onPath,
+    onSubmitPath,
     onSelect,
     onOpen,
     onFocus,
@@ -53,6 +55,7 @@
     activeTab: string;
     listing: DirListing | null;
     selected?: string[];
+    cursor?: string | null;
     focused?: boolean;
     filter?: string;
     canAdd?: boolean;
@@ -72,6 +75,7 @@
     onUp: () => void;
     onRefresh: () => void;
     onPath: (path: string) => void;
+    onSubmitPath?: (path: string) => void;
     onSelect: (entry: Entry, mode: "single" | "toggle" | "range") => void;
     onOpen: (entry: Entry) => void;
     onFocus: () => void;
@@ -105,13 +109,16 @@
   function commitPath() {
     const next = pathDraft.trim();
     editingPath = false;
-    if (next && next !== listing?.path) onPath(next);
+    if (next && next !== listing?.path) {
+      if (onSubmitPath) onSubmitPath(next);
+      else onPath(next);
+    }
   }
 
   const selectedSet = $derived(new Set(selected));
 
   $effect(() => {
-    const path = selected[selected.length - 1];
+    const path = cursor ?? selected[selected.length - 1];
     if (!path || !rowsEl) return;
     const row = rowsEl.querySelector(".row.selected") as HTMLElement | null;
     row?.scrollIntoView({ block: "nearest" });
@@ -519,6 +526,7 @@
       <button
         class="row"
         class:selected={selectedSet.has(entry.path)}
+        class:cursor={cursor === entry.path}
         class:only-here={(compareMode || otherNames) && compareState(entry) === "only"}
         class:different={compareState(entry) === "different"}
         draggable="false"
@@ -810,6 +818,11 @@
     padding: 0 10px;
     text-align: left;
     font-size: var(--row-font);
+  }
+
+  .row.cursor {
+    outline: 1px solid color-mix(in srgb, var(--accent) 65%, transparent);
+    outline-offset: -1px;
   }
 
   .row.only-here .name {

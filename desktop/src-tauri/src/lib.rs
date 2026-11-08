@@ -94,6 +94,8 @@ pub fn run() {
             commands::ai_models,
             commands::ai_ask,
             commands::compare_files,
+            commands::compare_text,
+            commands::resolve_remote_dir,
             commands::sync_scan,
             commands::log_dir,
             commands::load_log_settings,

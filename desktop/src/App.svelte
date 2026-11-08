@@ -13,6 +13,7 @@
     type DirListing,
     type OpenSession,
     type Server,
+    type SessionState,
     type ServerBook,
     type Settings,
     type TransferEvent,
@@ -35,6 +36,7 @@
   let notice = $state<string | null>(null);
 
   let restoreList = $state<OpenSession[]>([]);
+  let sessionState = $state<SessionState | null>(null);
   let restoreHidden = $state(false);
 
   let connecting = $state<{ server: Server; stage: number } | null>(null);
@@ -78,14 +80,17 @@
 
       void api.clearAllTmp().catch(() => {});
       volumes = await api.volumes().catch(() => []);
-      const home = await api.homeLocal();
-      await loadLocal(home);
 
       const state = await api.loadSessionState().catch(() => null);
+      sessionState = state;
       const ids = new Set((book?.servers ?? []).map((server) => server.id));
       restoreList = (state?.openSessions ?? []).filter((item) =>
         ids.has(item.serverId),
       );
+      const home = await api.homeLocal();
+      const recent = state?.recentLocal?.[0] ?? "";
+      await loadLocal(recent || home);
+      if (!local) await loadLocal(home);
     } catch (e) {
       error = `Инициализация: ${e}`;
     }
@@ -95,16 +100,65 @@
     book = await api.listServers();
   }
 
-  async function loadLocal(path: string, showHidden?: boolean) {
+  const listingCache = new Map<string, DirListing>();
+
+  function rememberListing(key: string, listing: DirListing) {
+    listingCache.set(key, listing);
+    if (listingCache.size > 150) {
+      const first = listingCache.keys().next().value;
+      if (first) listingCache.delete(first);
+    }
+  }
+
+  function localCacheKey(path: string, hidden: boolean) {
+    return `local|${hidden ? 1 : 0}|${path.toLowerCase()}`;
+  }
+
+  function remoteCacheKey(
+    sessionId: string,
+    path: string,
+    hidden: boolean,
+  ) {
+    return `remote|${sessionId}|${hidden ? 1 : 0}|${path}`;
+  }
+
+  async function loadLocal(
+    path: string,
+    showHidden?: boolean,
+    tabId?: string,
+  ) {
     if (!path.trim()) return;
+    const hidden = showHidden ?? settings?.panels?.showHidden ?? true;
+    const cacheKey = localCacheKey(path, hidden);
+    const cached = listingCache.get(cacheKey);
     try {
-      local = await api.listLocal(
-        path,
-        showHidden ?? settings?.panels?.showHidden ?? true,
-      );
+      if (cached) {
+        if (tabId) {
+          const tab = tabs.find((item) => item.id === tabId);
+          if (tab) tab.local = cached;
+          if (tabId === activeTabId) local = cached;
+        } else {
+          local = cached;
+        }
+      }
+      const listing = await api.listLocal(path, hidden);
+      rememberListing(cacheKey, listing);
+      if (tabId) {
+        const tab = tabs.find((item) => item.id === tabId);
+        if (tab) tab.local = listing;
+        if (tabId === activeTabId) local = listing;
+      } else {
+        local = listing;
+      }
       schedulePersist();
     } catch (e) {
       error = `Локально: ${e}`;
+      if (tabId) return;
+      const home = await api.homeLocal().catch(() => "");
+      if (home && home !== path) {
+        const listing = await api.listLocal(home).catch(() => null);
+        if (listing) local = listing;
+      }
     }
   }
 
@@ -115,16 +169,20 @@
   ) {
     const tab = tabs.find((item) => item.id === tabId);
     if (!tab || !path.trim()) return;
+    const hidden = showHidden ?? settings?.panels?.showHidden ?? true;
+    const cacheKey = remoteCacheKey(tab.sessionId, path, hidden);
+    const cached = listingCache.get(cacheKey);
+    if (cached) tab.listing = cached;
     try {
-      tab.listing = await api.listRemote(
-        tab.sessionId,
-        path,
-        showHidden ?? settings?.panels?.showHidden ?? true,
-      );
+      const listing = await api.listRemote(tab.sessionId, path, hidden);
+      rememberListing(cacheKey, listing);
+      tab.listing = listing;
       tab.disconnected = false;
+      tab.disconnectReason = undefined;
       schedulePersist();
     } catch (e) {
       tab.disconnected = true;
+      tab.disconnectReason = String(e);
       error = `Сервер: ${e}`;
     }
   }
@@ -139,6 +197,10 @@
       server,
       sessionId,
       listing: null,
+      local: local ? { ...local } : null,
+      localSel: [],
+      remoteSel: [],
+      archive: null,
     });
     activeTabId = id;
     showConnections = false;
@@ -161,22 +223,30 @@
       await api.saveOpenSessions([]).catch(() => {});
       return;
     }
-    const localPath = local?.path ?? "";
     await api
       .saveOpenSessions(
         tabs.map((tab) => ({
           serverId: tab.server.id,
           name: tab.label,
-          localPath,
+          localPath: tab.local?.path ?? "",
           remotePath: tab.listing?.path ?? "",
         })),
       )
       .catch(() => {});
-    // Remember each server's last folder so reopening a tab returns there.
+    // Remember each server's last folders so reopening a tab returns there.
     for (const tab of tabs) {
-      if (!tab.listing?.path) continue;
+      if (!tab.listing?.path && !tab.local?.path) continue;
+      updateSessionRecord(
+        tab.server.id,
+        tab.listing?.path ?? "",
+        tab.local?.path ?? "",
+      );
       await api
-        .rememberSession(tab.server.id, tab.listing.path, localPath)
+        .rememberSession(
+          tab.server.id,
+          tab.listing?.path ?? "",
+          tab.local?.path ?? "",
+        )
         .catch(() => {});
     }
   }
@@ -213,8 +283,17 @@
       const result = await api.connectServer(server.id, password);
       const tabId = addTab(server, result.sessionId);
       void loadUname(tabId, result.sessionId);
+      const remembered =
+        sessionState?.servers?.find((record) => record.serverId === server.id)
+          ?.localPath ?? "";
+      const localPath =
+        restore?.localPath ||
+        remembered ||
+        sessionState?.recentLocal?.[0] ||
+        local?.path ||
+        "";
+      if (localPath) await loadLocal(localPath, undefined, tabId);
       if (restore) {
-        if (restore.localPath) await loadLocal(restore.localPath);
         await loadRemote(
           tabId,
           restore.remotePath || result.startPath,
@@ -223,7 +302,7 @@
           .rememberSession(
             server.id,
             restore.remotePath || result.startPath,
-            restore.localPath || local?.path || "",
+            localPath,
           )
           .catch(() => {});
       } else {
@@ -269,6 +348,7 @@
       const result = await api.connectServer(tab.server.id, null);
       tab.sessionId = result.sessionId;
       tab.disconnected = false;
+      tab.disconnectReason = undefined;
       void loadUname(id, result.sessionId);
       await loadRemote(id, tab.listing?.path || result.startPath);
     } catch (e) {
@@ -285,15 +365,35 @@
     }
   }
 
+  function updateSessionRecord(
+    serverId: string,
+    remotePath: string,
+    localPath: string,
+  ) {
+    if (!sessionState) return;
+    const record = sessionState.servers.find(
+      (item) => item.serverId === serverId,
+    );
+    if (record) {
+      record.path = remotePath;
+      record.localPath = localPath;
+    } else {
+      sessionState.servers.push({
+        serverId,
+        path: remotePath,
+        localPath,
+      });
+    }
+  }
+
   async function closeTab(id: string) {
     const tab = tabs.find((item) => item.id === id);
     if (tab) {
+      const remotePath = tab.listing?.path ?? "";
+      const localPath = tab.local?.path ?? "";
+      updateSessionRecord(tab.server.id, remotePath, localPath);
       await api
-        .rememberSession(
-          tab.server.id,
-          tab.listing?.path ?? "",
-          local?.path ?? "",
-        )
+        .rememberSession(tab.server.id, remotePath, localPath)
         .catch(() => {});
       await api.disconnect(tab.sessionId).catch(() => {});
     }
@@ -510,7 +610,10 @@
         channel,
       );
       if (job.direction === "download") {
-        if (local?.path === job.targetDir) await loadLocal(job.targetDir);
+        const tab = tabs.find((item) => item.id === job.tabId);
+        if (tab?.local?.path === job.targetDir) {
+          await loadLocal(job.targetDir, undefined, job.tabId);
+        }
       } else {
         const tab = tabs.find((item) => item.id === job.tabId);
         if (tab?.listing?.path === job.targetDir) {
@@ -550,6 +653,20 @@
     await api.cancelArchiveJob(id).catch(() => {});
   }
 
+  async function toggleAppTheme() {
+    const next =
+      document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    if (!settings) return;
+    settings = {
+      ...settings,
+      window: { ...settings.window, theme: next },
+    };
+    await api.saveSettings(settings).catch((e) => {
+      error = `Тема: ${e}`;
+    });
+  }
+
   async function saveSettings(next: Settings) {
     await api.saveSettings(next);
     settings = await api.loadSettings();
@@ -559,7 +676,12 @@
     );
     applyAppearance(settings?.appearance);
     void api.setSolidMode(settings?.window?.solidMode ?? false).catch(() => {});
-    if (local) await loadLocal(local.path);
+    const activeTab = tabs.find((item) => item.id === activeTabId);
+    if (activeTab?.local?.path) {
+      await loadLocal(activeTab.local.path, undefined, activeTab.id);
+    } else if (local) {
+      await loadLocal(local.path);
+    }
     if (tabs.length) {
       const tab = tabs.find((item) => item.id === activeTabId);
       if (tab?.listing) await loadRemote(tab.id, tab.listing.path);
@@ -568,7 +690,7 @@
 </script>
 
 <div class="app">
-  <TitleBar />
+  <TitleBar onToggleTheme={toggleAppTheme} />
 
   {#if showSettings && settings}
     <SettingsPage
@@ -608,7 +730,7 @@
     <BrowserPage
       {tabs}
       {activeTabId}
-      {local}
+      local={tabs.find((item) => item.id === activeTabId)?.local ?? local}
       {settings}
       {volumes}
       {transfers}
@@ -634,7 +756,8 @@
         showConnections = true;
         void persistSessions();
       }}
-      onLocalPath={loadLocal}
+      onLocalPath={(path, showHidden) =>
+        loadLocal(path, showHidden, activeTabId)}
       onRemotePath={loadRemote}
       onReconnect={reconnectTab}
       onTransfer={transfer}

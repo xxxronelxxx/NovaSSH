@@ -3,6 +3,13 @@
   import { Minus, Moon, Square, Sun, X, Zap } from "lucide-svelte";
   import { prefs, toggleTheme } from "./theme.svelte";
 
+  let { onToggleTheme }: { onToggleTheme?: () => void } = $props();
+
+  function flipTheme() {
+    if (onToggleTheme) onToggleTheme();
+    else toggleTheme();
+  }
+
   const win = getCurrentWindow();
   const dark = $derived(prefs.mode !== "light");
 </script>
@@ -16,7 +23,7 @@
   <button
     class="theme"
     title={dark ? "Светлая тема" : "Тёмная тема"}
-    onclick={toggleTheme}
+    onclick={flipTheme}
   >
     {#if dark}
       <Sun size={15} />

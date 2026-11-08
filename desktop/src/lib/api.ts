@@ -239,6 +239,12 @@ export interface CompareResult {
   rightHash: string | null;
   leftEol: string;
   rightEol: string;
+  leftBom: boolean;
+  rightBom: boolean;
+  leftFinalNewline: boolean;
+  rightFinalNewline: boolean;
+  leftReadOnly: string | null;
+  rightReadOnly: string | null;
   rows: DiffRow[];
 }
 
@@ -262,10 +268,19 @@ export interface OpenSession {
   remotePath: string;
 }
 
+export interface ServerSessionRecord {
+  serverId: string;
+  path: string;
+  localPath: string;
+  tabs?: { remote: string; local: string }[];
+  activeTab?: number;
+  filter?: string;
+}
+
 export interface SessionState {
   version: number;
   lastServerId: string | null;
-  servers: unknown[];
+  servers: ServerSessionRecord[];
   history: unknown[];
   recentLocal: string[];
   openSessions: OpenSession[];
@@ -559,6 +574,10 @@ export const api = {
     invoke<WinscpImportReport>("import_winscp_ini", { iniPath }),
   compareFiles: (left: FileRef, right: FileRef, options: CompareOptions) =>
     invoke<CompareResult>("compare_files", { left, right, options }),
+  compareText: (left: string, right: string, options: CompareOptions) =>
+    invoke<CompareResult>("compare_text", { left, right, options }),
+  resolveRemoteDir: (sessionId: string, input: string, fallback: string) =>
+    invoke<string>("resolve_remote_dir", { sessionId, input, fallback }),
   syncScan: (
     sessionId: string,
     localRoot: string,
