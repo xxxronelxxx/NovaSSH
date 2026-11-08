@@ -6079,8 +6079,11 @@ class _BrowserPageState extends State<BrowserPage> {
     };
     final nameColor = ruleColor ?? (entry.hidden ? T.faint : baseColor);
 
-    return InkWell(
-      onTap: () => setState(() {
+    return GestureDetector(
+      // Selection must follow the mouse button, not the double-click timeout:
+      // `InkWell.onTap` waits ~300 ms when `onDoubleTap` is also registered.
+      behavior: HitTestBehavior.opaque,
+      onTapDown: (_) => setState(() {
         _focusPane(_tabOf(pane), pane.scope);
         _active = pane.scope;
         pane.cursor = index;
