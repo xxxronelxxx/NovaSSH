@@ -1099,3 +1099,8 @@ pub async fn resolve_remote_dir(
 pub async fn upgrade_vault_to_device_key() -> Result<bool, String> {
     blocking!(api::upgrade_vault_to_device_key())
 }
+
+#[tauri::command]
+pub async fn rekey_vault_to_device_key(password: String) -> Result<(), String> {
+    blocking!(api::rekey_vault_to_device_key(password))
+}

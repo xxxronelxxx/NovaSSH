@@ -635,6 +635,8 @@ export const api = {
     invoke<string>("exec_remote", { sessionId, command }),
   upgradeVaultToDeviceKey: () =>
     invoke<boolean>("upgrade_vault_to_device_key"),
+  rekeyVaultToDeviceKey: (password: string) =>
+    invoke<void>("rekey_vault_to_device_key", { password }),
   appendEditLog: (
     server: string,
     serverName: string,
