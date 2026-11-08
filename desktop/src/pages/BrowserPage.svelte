@@ -100,6 +100,7 @@
   let secret = $state<{
     title: string;
     action: (value: string) => Promise<void>;
+    cancel?: () => void;
   } | null>(null);
   let secretValue = $state("");
   let confirm = $state<{
@@ -552,6 +553,30 @@
     return { channel };
   }
 
+  function ensureArchivePassword(path: string): Promise<boolean> {
+    return api
+      .archiveNeedsPassword(path)
+      .catch(() => false)
+      .then(
+        (needed) =>
+          new Promise<boolean>((resolve) => {
+            if (!needed) {
+              resolve(true);
+              return;
+            }
+            secret = {
+              title: `Пароль архива ${baseName(path)}`,
+              action: async (password) => {
+                await api.unlockArchive(path, password);
+                resolve(true);
+              },
+              cancel: () => resolve(false),
+            };
+            secretValue = "";
+          }),
+      );
+  }
+
   async function copyOutOfArchive(inner: string, targetDir: string) {
     const current = archive;
     if (!current || !tab) return;
@@ -817,6 +842,7 @@
         return;
       }
       if (!isArchiveName(entry.name) || !tab || !remote) return;
+      if (!(await ensureArchivePassword(entry.path))) return;
       const { channel } = trackChannel();
       await run("Распаковываю…", async () => {
         await api.copyFromArchive(
@@ -844,6 +870,7 @@
         tab.label,
         entry.path,
       );
+      if (!(await ensureArchivePassword(cached))) return;
       await api.copyFromArchive(null, cached, "", local.path, channel);
       await onLocalPath(local.path);
     });
@@ -1837,7 +1864,13 @@
 {/if}
 
 {#if secret}
-  <div class="overlay" onclick={() => (secret = null)}>
+  <div
+    class="overlay"
+    onclick={() => {
+      secret?.cancel?.();
+      secret = null;
+    }}
+  >
     <div class="dialog" onclick={(e) => e.stopPropagation()}>
       <div class="dialog-title">{secret.title}</div>
       <label class="field">
@@ -1850,7 +1883,15 @@
         />
       </label>
       <div class="foot">
-        <button class="btn" onclick={() => (secret = null)}>Отмена</button>
+        <button
+          class="btn"
+          onclick={() => {
+            secret?.cancel?.();
+            secret = null;
+          }}
+        >
+          Отмена
+        </button>
         <button class="btn primary" onclick={submitSecret}>Открыть</button>
       </div>
     </div>
