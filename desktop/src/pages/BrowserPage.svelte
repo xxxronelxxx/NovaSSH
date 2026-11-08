@@ -117,6 +117,9 @@
     tab.localSel = [...localSel];
     tab.remoteSel = [...remoteSel];
     tab.archive = archive;
+    tab.localCursor = localCursor;
+    tab.localSort = { ...localSort };
+    tab.filter = filter;
   });
 
   $effect(() => {
@@ -128,6 +131,9 @@
         previous.localSel = [...localSel];
         previous.remoteSel = [...remoteSel];
         previous.archive = archive;
+        previous.localCursor = localCursor;
+        previous.localSort = { ...localSort };
+        previous.filter = filter;
       }
     }
     stateLoadedFor = id;
@@ -135,8 +141,11 @@
     const next = tabs.find((item) => item.id === id);
     localSel = next ? [...next.localSel] : [];
     remoteSel = next ? [...next.remoteSel] : [];
-    localCursor = localSel.length ? localSel[localSel.length - 1] : null;
+    localCursor = next?.localCursor ?? null;
     remoteCursor = remoteSel.length ? remoteSel[remoteSel.length - 1] : null;
+    localSort = next?.localSort ? { ...next.localSort } : { key: "name", asc: true };
+    filter = next?.filter ?? "";
+    filterHidden = filter.trim().startsWith(".");
     archive = next?.archive ?? null;
   });
 

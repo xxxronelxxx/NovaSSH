@@ -201,6 +201,9 @@
       localSel: [],
       remoteSel: [],
       archive: null,
+      localCursor: null,
+      localSort: { key: "name", asc: true },
+      filter: "",
     });
     activeTabId = id;
     showConnections = false;

@@ -413,6 +413,16 @@
       requestClose();
       return;
     }
+    if (event.key === "F3") {
+      event.preventDefault();
+      jump(1);
+      return;
+    }
+    if (event.key === "F2") {
+      event.preventDefault();
+      jump(-1);
+      return;
+    }
     if (!(event.ctrlKey || event.metaKey)) return;
     const key = event.key.toLowerCase();
     if (key === "s") {

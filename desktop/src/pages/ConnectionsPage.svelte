@@ -129,6 +129,9 @@
   async function submitUnlock() {
     try {
       await api.unlockVault(unlockPassword);
+      // One-time migration of an old password vault: from now on the DPAPI
+      // device key opens it, so Windows never asks for a master password.
+      await api.upgradeVaultToDeviceKey().catch(() => false);
       locked = false;
       unlockOpen = false;
       await onBookChanged();

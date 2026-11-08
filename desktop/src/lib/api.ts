@@ -633,6 +633,8 @@ export const api = {
   clearAllTmp: () => invoke<void>("clear_all_tmp"),
   execRemote: (sessionId: string, command: string) =>
     invoke<string>("exec_remote", { sessionId, command }),
+  upgradeVaultToDeviceKey: () =>
+    invoke<boolean>("upgrade_vault_to_device_key"),
   appendEditLog: (
     server: string,
     serverName: string,

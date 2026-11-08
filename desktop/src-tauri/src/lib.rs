@@ -91,6 +91,7 @@ pub fn run() {
             commands::clear_server_tmp,
             commands::clear_all_tmp,
             commands::exec_remote,
+            commands::upgrade_vault_to_device_key,
             commands::ai_models,
             commands::ai_ask,
             commands::compare_files,

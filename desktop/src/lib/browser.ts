@@ -17,6 +17,9 @@ export interface BrowserTab {
   localSel: string[];
   remoteSel: string[];
   archive: ArchiveState | null;
+  localCursor: string | null;
+  localSort: { key: string; asc: boolean };
+  filter: string;
   disconnected?: boolean;
   disconnectReason?: string;
   uname?: string;
