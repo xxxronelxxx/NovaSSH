@@ -35,6 +35,7 @@
     transfers = [],
     onSelectTab,
     onCloseTab,
+    onReorderTab,
     onAddTab,
     onBack,
     onLocalPath,
@@ -53,6 +54,7 @@
     transfers?: TransferEvent[];
     onSelectTab: (id: string) => void;
     onCloseTab: (id: string) => void;
+    onReorderTab: (fromId: string, toId: string) => void;
     onAddTab: () => void;
     onBack: () => void;
     onLocalPath: (path: string) => void | Promise<void>;
@@ -131,6 +133,7 @@
   let bulkOpen = $state(false);
   let bookmarksOpen = $state(false);
   let dirCompare = $state(false);
+  let split = $state(false);
   let transferPrompt = $state<{
     direction: "upload" | "download";
     items: Entry[];
@@ -233,10 +236,10 @@
     return !!selectedEntry && selectedEntry.kind !== "dir" && !!local;
   });
 
-  $effect(() => {
-    activeTabId;
-    remoteSel = [];
-  });
+  function chooseTab(id: string) {
+    if (id !== activeTabId) remoteSel = [];
+    onSelectTab(id);
+  }
 
   function applySelection(
     current: string[],
@@ -734,6 +737,44 @@
     } catch (e) {
       error = String(e);
     }
+  }
+
+  function toggleSplit() {
+    if (tabs.length < 2) return;
+    split = !split;
+  }
+
+  function gridSelect(
+    tabId: string,
+    entries: Entry[],
+    entry: Entry,
+    mode: "single" | "toggle" | "range",
+  ) {
+    if (tabId !== activeTabId) {
+      activeTabId = tabId;
+      remoteSel = [];
+    }
+    focused = "remote";
+    remoteSel = applySelection(remoteSel, entries, entry, mode);
+  }
+
+  function gridNavigate(tabId: string, path: string) {
+    if (tabId !== activeTabId) {
+      activeTabId = tabId;
+      remoteSel = [];
+    }
+    focused = "remote";
+    void onRemotePath(tabId, path);
+  }
+
+  function gridOpen(tabId: string, entry: Entry) {
+    if (tabId !== activeTabId) {
+      activeTabId = tabId;
+      remoteSel = [];
+    }
+    focused = "remote";
+    remoteSel = [entry.path];
+    openRemote(entry);
   }
 
   function openBookmarks() {
@@ -1491,6 +1532,9 @@
     {canExtract}
     compareDirs={dirCompare}
     syncNavigation={settings?.panels?.syncNavigation === true}
+    {split}
+    canSplit={tabs.length > 1}
+    canBulk={!!selectedEntry && !archive}
     {terminalOpen}
     {filter}
     onBack={onBack}
@@ -1502,6 +1546,8 @@
     onExtract={extractSelected}
     onCompareDirs={toggleDirCompare}
     onSyncNavigation={toggleSyncNavigation}
+    onToggleSplit={toggleSplit}
+    onBulk={bulkRename}
     onRename={renameSelected}
     onDelete={deleteSelected}
     onMkdir={mkdirPrompt}
@@ -1533,34 +1579,81 @@
       onContextMenu={openMenu}
     />
 
-    <PaneCard
-      variant="remote"
-      tabs={tabs.map((item) => ({
-        id: item.id,
-        label: item.label,
-        hint: `${item.server.user}@${item.server.host}`,
-      }))}
-      activeTab={activeTabId}
-      listing={remote}
-      selected={remoteSel}
-      focused={focused === "remote"}
-      filter={focused === "remote" ? filter : ""}
-      canAdd
-      otherNames={comparePanels ? localNames : undefined}
-      otherEntries={localListing?.entries ?? []}
-      compareMode={dirCompare}
-      onSelectTab={onSelectTab}
-      onCloseTab={onCloseTab}
-      onAdd={onAddTab}
-      onUp={() => remote?.parent && navigateRemote(remote.parent)}
-      onRefresh={() => remote && navigateRemote(remote.path)}
-      onPath={navigateRemote}
-      onSelect={selectRemote}
-      onDrop={(source, paths) => dropPaths(source, "remote", paths)}
-      onOpen={openRemote}
-      onFocus={() => (focused = "remote")}
-      onContextMenu={openMenu}
-    />
+    {#if split && tabs.length > 1}
+      <div class="remote-grid" style:--cols={tabs.length <= 2 ? 1 : 2}>
+        {#each tabs as item (item.id)}
+          <PaneCard
+            variant="remote"
+            tabs={[
+              {
+                id: item.id,
+                label: item.label,
+                hint: `${item.server.user}@${item.server.host}`,
+              },
+            ]}
+            activeTab={item.id}
+            listing={item.listing}
+            selected={item.id === activeTabId ? remoteSel : []}
+            focused={item.id === activeTabId && focused === "remote"}
+            filter={item.id === activeTabId && focused === "remote" ? filter : ""}
+            canAdd
+            otherNames={comparePanels ? localNames : undefined}
+            otherEntries={localListing?.entries ?? []}
+            compareMode={dirCompare}
+            onSelectTab={() => chooseTab(item.id)}
+            onCloseTab={onCloseTab}
+            onAdd={onAddTab}
+            onUp={() =>
+              item.listing?.parent && gridNavigate(item.id, item.listing.parent)}
+            onRefresh={() =>
+              item.listing && gridNavigate(item.id, item.listing.path)}
+            onPath={(path) => gridNavigate(item.id, path)}
+            onSelect={(entry, mode) =>
+              gridSelect(item.id, item.listing?.entries ?? [], entry, mode)}
+            onDrop={(source, paths) => {
+              activeTabId = item.id;
+              void dropPaths(source, "remote", paths);
+            }}
+            onOpen={(entry) => gridOpen(item.id, entry)}
+            onFocus={() => {
+              activeTabId = item.id;
+              focused = "remote";
+            }}
+            onContextMenu={openMenu}
+          />
+        {/each}
+      </div>
+    {:else}
+      <PaneCard
+        variant="remote"
+        tabs={tabs.map((item) => ({
+          id: item.id,
+          label: item.label,
+          hint: `${item.server.user}@${item.server.host}`,
+        }))}
+        activeTab={activeTabId}
+        listing={remote}
+        selected={remoteSel}
+        focused={focused === "remote"}
+        filter={focused === "remote" ? filter : ""}
+        canAdd
+        otherNames={comparePanels ? localNames : undefined}
+        otherEntries={localListing?.entries ?? []}
+        compareMode={dirCompare}
+        onSelectTab={chooseTab}
+        onCloseTab={onCloseTab}
+        onReorderTab={onReorderTab}
+        onAdd={onAddTab}
+        onUp={() => remote?.parent && navigateRemote(remote.parent)}
+        onRefresh={() => remote && navigateRemote(remote.path)}
+        onPath={navigateRemote}
+        onSelect={selectRemote}
+        onDrop={(source, paths) => dropPaths(source, "remote", paths)}
+        onOpen={openRemote}
+        onFocus={() => (focused = "remote")}
+        onContextMenu={openMenu}
+      />
+    {/if}
   </div>
 
   {#if tab?.disconnected}
@@ -1960,6 +2053,16 @@
     gap: 10px;
     min-height: 0;
     padding: 0 18px 10px;
+  }
+
+  .remote-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+    grid-auto-rows: minmax(0, 1fr);
+    gap: 8px;
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
   }
 
   .offline {

@@ -33,6 +33,7 @@
     compareMode = false,
     onSelectTab,
     onCloseTab,
+    onReorderTab,
     onContextMenu,
     onAdd,
     onUp,
@@ -56,6 +57,7 @@
     compareMode?: boolean;
     onSelectTab: (id: string) => void;
     onCloseTab?: (id: string) => void;
+    onReorderTab?: (fromId: string, toId: string) => void;
     onContextMenu?: (entry: Entry | null, event: MouseEvent) => void;
     onAdd: () => void;
     onUp: () => void;
@@ -285,7 +287,24 @@
       <PanelLeft size={15} />
     </span>
     {#each tabs as tab (tab.id)}
-      <div class="tab" class:active={tab.id === activeTab} title={tab.hint ?? tab.label}>
+      <div
+        class="tab"
+        class:active={tab.id === activeTab}
+        title={tab.hint ?? tab.label}
+        draggable="true"
+        ondragstart={(event) => {
+          event.dataTransfer?.setData("application/x-nova-tab", tab.id);
+        }}
+        ondragover={(event) => {
+          if (event.dataTransfer?.types.includes("application/x-nova-tab")) {
+            event.preventDefault();
+          }
+        }}
+        ondrop={(event) => {
+          const from = event.dataTransfer?.getData("application/x-nova-tab");
+          if (from && from !== tab.id) onReorderTab?.(from, tab.id);
+        }}
+      >
         <button class="tab-label" onclick={() => onSelectTab(tab.id)}>
           {#if variant === "remote"}
             <Network size={14} />

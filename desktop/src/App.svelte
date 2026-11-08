@@ -516,6 +516,14 @@
       {transfers}
       onSelectTab={(id) => (activeTabId = id)}
       onCloseTab={closeTab}
+      onReorderTab={(fromId, toId) => {
+        const from = tabs.findIndex((tab) => tab.id === fromId);
+        const to = tabs.findIndex((tab) => tab.id === toId);
+        if (from < 0 || to < 0 || from === to) return;
+        const [moved] = tabs.splice(from, 1);
+        tabs.splice(to, 0, moved);
+        tabs = [...tabs];
+      }}
       onAddTab={() => (showConnections = true)}
       onBack={() => {
         showConnections = true;

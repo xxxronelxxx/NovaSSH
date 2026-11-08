@@ -31,6 +31,9 @@
     canExtract = false,
     compareDirs = false,
     syncNavigation = false,
+    split = false,
+    canSplit = false,
+    canBulk = false,
     terminalOpen = false,
     filter = "",
     onBack,
@@ -42,6 +45,8 @@
     onExtract,
     onCompareDirs,
     onSyncNavigation,
+    onToggleSplit,
+    onBulk,
     onRename,
     onDelete,
     onMkdir,
@@ -69,6 +74,8 @@
     onExtract: () => void;
     onCompareDirs: () => void;
     onSyncNavigation: () => void;
+    onToggleSplit: () => void;
+    onBulk: () => void;
     onRename: () => void;
     onDelete: () => void;
     onMkdir: () => void;
@@ -89,7 +96,13 @@
   <button class="tool" title="Обновить" onclick={onRefresh}>
     <RefreshCw size={16} />
   </button>
-  <button class="tool" title="Разделить панель" disabled>
+  <button
+    class="tool"
+    class:accent={split}
+    title={split ? "Свести серверы в одну панель" : "Разделить панель: все серверы рядом"}
+    disabled={!canSplit}
+    onclick={onToggleSplit}
+  >
     <Columns2 size={16} />
   </button>
 
@@ -100,12 +113,6 @@
   </button>
   <button class="tool" title="Сравнить файлы (Ctrl+F3)" disabled={!canCompare} onclick={onCompare}>
     <GitCompare size={16} />
-  </button>
-  <button class="tool" title="Сравнить каталоги" disabled>
-    <Diff size={16} />
-  </button>
-  <button class="tool" title="Синхронная навигация" disabled>
-    <ArrowLeftRight size={16} />
   </button>
   <button
     class="tool"
@@ -135,7 +142,12 @@
   <button class="tool" title="Переименовать (F2)" disabled={!canRename} onclick={onRename}>
     <PencilLine size={16} />
   </button>
-  <button class="tool" title="Массовое переименование" disabled>
+  <button
+    class="tool"
+    title="Массовое переименование"
+    disabled={!canBulk}
+    onclick={onBulk}
+  >
     <ListChecks size={16} />
   </button>
   <button class="tool" title="Новая папка (F7)" onclick={onMkdir}>
