@@ -140,23 +140,6 @@
     }
   }
 
-  let autoProbed = false;
-
-  $effect(() => {
-    // Quiet background check once the book is loaded: servers that were never
-    // probed or whose result is older than 30 minutes.
-    const servers = book?.servers ?? [];
-    if (autoProbed || !servers.length) return;
-    autoProbed = true;
-    const stale = servers.filter(
-      (server) =>
-        server.reachable == null ||
-        !server.checkedAt ||
-        Date.now() - server.checkedAt > 30 * 60 * 1000,
-    );
-    if (stale.length) void probeServers(stale, true);
-  });
-
   async function probeOne(serverId: string): Promise<boolean> {
     try {
       const state = await Promise.race([
