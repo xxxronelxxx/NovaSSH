@@ -289,6 +289,7 @@
     direction: "upload" | "download";
     sourcePath: string;
     targetDir: string;
+    targetName: string | null;
   }
 
   let queue: TransferJob[] = [];
@@ -320,6 +321,7 @@
     direction: "upload" | "download",
     sourcePath: string,
     targetDir: string,
+    targetName: string | null = null,
   ) {
     const tab = tabs.find((item) => item.id === activeTabId);
     if (!tab) return;
@@ -330,6 +332,7 @@
       direction,
       sourcePath,
       targetDir,
+      targetName,
     });
     void pumpTransfers();
   }
@@ -373,8 +376,8 @@
     const name = baseName(job.sourcePath);
     const exists = await existingTarget(job, name);
     let resumeFrom = 0;
-    let targetName: string | null = null;
-    if (exists != null) {
+    let targetName: string | null = job.targetName;
+    if (exists != null && !targetName) {
       const policy = settings?.transfer.conflictPolicy ?? "ask";
       if (policy === "skip") return;
       if (policy === "ask") {

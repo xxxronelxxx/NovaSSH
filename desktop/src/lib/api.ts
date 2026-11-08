@@ -118,6 +118,8 @@ export interface Appearance {
 
 export interface PanelSettings {
   showHidden: boolean;
+  localBookmarks?: string[];
+  remoteBookmarks?: string[];
   syncNavigation: boolean;
   comparePanels: boolean;
   tabsEnabled: boolean;

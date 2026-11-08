@@ -3,6 +3,9 @@
   import { onMount } from "svelte";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import BulkRenameDialog from "../lib/BulkRenameDialog.svelte";
+  import BookmarksDialog from "../lib/BookmarksDialog.svelte";
+  import TransferPromptDialog from "../lib/TransferPromptDialog.svelte";
+  import hljs from "highlight.js/lib/common";
   import PaneCard from "../lib/PaneCard.svelte";
   import Toolbar from "../lib/Toolbar.svelte";
   import TransferPanel from "../lib/TransferPanel.svelte";
@@ -58,6 +61,7 @@
       direction: "upload" | "download",
       sourcePath: string,
       targetDir: string,
+      targetName?: string | null,
     ) => void;
     onCancelTransfer: (id: string) => void;
     onTrackTransfer: (event: TransferEvent) => void;
@@ -125,6 +129,12 @@
 
   let compareOpen = $state(false);
   let bulkOpen = $state(false);
+  let bookmarksOpen = $state(false);
+  let transferPrompt = $state<{
+    direction: "upload" | "download";
+    items: Entry[];
+    targetDir: string;
+  } | null>(null);
   let syncOpen = $state(false);
 
   let createOpen = $state(false);
@@ -275,19 +285,49 @@
     }
   }
 
+  async function syncOther(name: string) {
+    if (!settings?.panels?.syncNavigation || !name) return;
+    if (focused === "local" && tab && remote) {
+      const match = remote.entries.find(
+        (entry) =>
+          entry.kind === "dir" &&
+          entry.name.toLowerCase() === name.toLowerCase(),
+      );
+      if (match) await onRemotePath(tab.id, match.path);
+    } else if (focused === "remote" && localListing) {
+      const match = localListing.entries.find(
+        (entry) =>
+          entry.kind === "dir" &&
+          entry.name.toLowerCase() === name.toLowerCase(),
+      );
+      if (match) await onLocalPath(match.path);
+    }
+  }
+
+  function baseName(path: string): string {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? "";
+  }
+
   async function navigateLocal(path: string) {
     localSel = [];
     if (archive) {
       await loadArchive(path);
       return;
     }
+    const name = baseName(path);
+    focused = "local";
     await onLocalPath(path);
+    await syncOther(name);
   }
 
   async function navigateRemote(path: string) {
     if (!tab) return;
     remoteSel = [];
+    const name = baseName(path);
+    focused = "remote";
     await onRemotePath(tab.id, path);
+    await syncOther(name);
   }
 
   async function loadArchive(inner: string) {
@@ -526,9 +566,11 @@
         return;
       }
       if (!tab || !remote) return;
-      for (const entry of items) {
-        onTransfer("upload", entry.path, remote.path);
-      }
+      transferPrompt = {
+        direction: "upload",
+        items,
+        targetDir: remote.path,
+      };
       return;
     }
 
@@ -549,8 +591,24 @@
     }
 
     if (!local) return;
-    for (const entry of items) {
-      onTransfer("download", entry.path, local.path);
+    transferPrompt = {
+      direction: "download",
+      items,
+      targetDir: local.path,
+    };
+  }
+
+  function confirmTransfer(result: { dir: string; name: string | null }) {
+    const prompt = transferPrompt;
+    transferPrompt = null;
+    if (!prompt) return;
+    for (const entry of prompt.items) {
+      onTransfer(
+        prompt.direction,
+        entry.path,
+        result.dir,
+        prompt.items.length === 1 ? result.name : null,
+      );
     }
   }
 
@@ -618,6 +676,11 @@
       unlisten?.();
     };
   });
+
+  function openBookmarks() {
+    if (!settings) return;
+    bookmarksOpen = true;
+  }
 
   function bulkRename() {
     if (archive) {
@@ -859,6 +922,50 @@
       await reload();
     });
   }
+
+  const highlighted = $derived.by(() => {
+    if (!editor || editor.mode === "edit") return "";
+    const name = editor.entry.name.toLowerCase();
+    const ext = name.includes(".") ? name.split(".").pop() ?? "" : "";
+    const language =
+      ext === "php"
+        ? "php"
+        : ext === "js" || ext === "mjs" || ext === "cjs"
+          ? "javascript"
+          : ext === "ts"
+            ? "typescript"
+            : ext === "json"
+              ? "json"
+              : ext === "html" || ext === "htm"
+                ? "xml"
+                : ext === "css"
+                  ? "css"
+                  : ext === "md"
+                    ? "markdown"
+                    : ext === "sh" || ext === "bash"
+                      ? "bash"
+                      : ext === "yml" || ext === "yaml"
+                        ? "yaml"
+                        : ext === "xml"
+                          ? "xml"
+                          : ext === "rs"
+                            ? "rust"
+                            : ext === "py"
+                              ? "python"
+                              : ext === "sql"
+                                ? "sql"
+                                : ext === "ini" || ext === "conf"
+                                  ? "ini"
+                                  : "";
+    const text = editor.text.slice(0, 200000);
+    try {
+      return language
+        ? hljs.highlight(text, { language, ignoreIllegals: true }).value
+        : hljs.highlightAuto(text).value;
+    } catch {
+      return "";
+    }
+  });
 
   const editorTruncated = $derived((editor?.text.length ?? 0) >= 262140);
   const editorDirty = $derived(
@@ -1171,6 +1278,11 @@
     ) {
       return;
     }
+    if (event.ctrlKey && event.key.toLowerCase() === "d") {
+      event.preventDefault();
+      openBookmarks();
+      return;
+    }
     if (event.ctrlKey && event.key === "F3") {
       event.preventDefault();
       openCompare();
@@ -1473,6 +1585,9 @@
     {:else}
       <button onclick={() => menuAction(mkdirPrompt)}>Новая папка (F7)</button>
       <button onclick={() => menuAction(openFind)}>Найти файлы…</button>
+      <button onclick={() => menuAction(openBookmarks)}>
+        Закладки (Ctrl+D)
+      </button>
       {#if selectedEntry && looksLikeVolume(selectedEntry.name)}
         <button onclick={() => menuAction(assembleVolumes)}>
           Собрать части в архив…
@@ -1480,6 +1595,31 @@
       {/if}
     {/if}
   </div>
+{/if}
+
+{#if transferPrompt}
+  <TransferPromptDialog
+    title={transferPrompt.direction === "upload" ? "Отправить" : "Скачать"}
+    items={transferPrompt.items.map((entry) => entry.name)}
+    initialDir={transferPrompt.targetDir}
+    dirLabel={transferPrompt.direction === "upload" ? "Каталог на сервере" : "Каталог на компьютере"}
+    allowRename={!archive}
+    onClose={() => (transferPrompt = null)}
+    onConfirm={confirmTransfer}
+  />
+{/if}
+
+{#if bookmarksOpen && settings}
+  <BookmarksDialog
+    {settings}
+    remote={focused === "remote"}
+    current={focused === "local" ? (local?.path ?? "") : (remote?.path ?? "")}
+    onClose={() => (bookmarksOpen = false)}
+    onOpen={(path) => {
+      if (focused === "local") void navigateLocal(path);
+      else void navigateRemote(path);
+    }}
+  />
 {/if}
 
 {#if bulkOpen}
@@ -1629,7 +1769,7 @@
           <div class="warn">Файл больше 256 КБ — сохранение отключено.</div>
         {/if}
       {:else}
-        <pre class:wrap>{editor.text}</pre>
+        <pre class="code" class:wrap>{@html highlighted || editor.text}</pre>
       {/if}
     </div>
   </div>
@@ -1976,6 +2116,32 @@
   }
 
   .viewer textarea.wrap,
+  .viewer pre.code :global(.hljs-keyword),
+  .viewer pre.code :global(.hljs-selector-tag),
+  .viewer pre.code :global(.hljs-built_in) {
+    color: #c792ea;
+  }
+
+  .viewer pre.code :global(.hljs-string),
+  .viewer pre.code :global(.hljs-attr) {
+    color: #a5e075;
+  }
+
+  .viewer pre.code :global(.hljs-number),
+  .viewer pre.code :global(.hljs-literal) {
+    color: #f0c04a;
+  }
+
+  .viewer pre.code :global(.hljs-comment) {
+    color: var(--faint);
+    font-style: italic;
+  }
+
+  .viewer pre.code :global(.hljs-title),
+  .viewer pre.code :global(.hljs-function) {
+    color: #6cb6ff;
+  }
+
   .viewer pre.wrap {
     white-space: pre-wrap;
     word-break: break-all;
